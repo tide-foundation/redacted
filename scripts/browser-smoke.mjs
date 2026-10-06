@@ -33,7 +33,7 @@ await page.route('**/api/service/**', async route => {
 });
 try {
   await page.goto(process.env.BASE_URL || 'http://127.0.0.1:4173');
-  await page.getByText('No current file.').waitFor();
+  await page.getByText('No files yet.').waitFor();
   await mkdir('artifacts', { recursive: true });
   const redactButton = page.getByRole('button', { name: 'REDACT', exact: true });
   assert.equal(await redactButton.isDisabled(), true);
@@ -109,7 +109,7 @@ try {
     await dialog.accept();
   });
   await page.getByRole('button', { name: /Delete document/ }).click();
-  await page.getByText('No current file.').waitFor();
+  await page.getByText('No files yet.').waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'About redaction modes', exact: true }).click();
   await page.screenshot({ path: 'artifacts/mobile.png', fullPage: true });

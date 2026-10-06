@@ -1,5 +1,16 @@
 name: redacted
 services:
+  model-init:
+    image: redacted:local
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    entrypoint: ["python", "/app/scripts/download-model.py"]
+    volumes:
+      - model:/models
+    restart: "no"
   app:
     image: redacted:local
     build:
@@ -7,13 +18,22 @@ services:
       args:
         APP_UID: ${LOCAL_UID:-1000}
         APP_GID: ${LOCAL_GID:-1000}
+    environment:
+      REDACTED_PUBLIC_URL: http://localhost:${REDACTED_PORT:-3001}
+      TIDECLOAK_INTERNAL_URL: ${TIDECLOAK_INTERNAL_URL:-http://tidecloak:8080}
+      TIDECLOAK_PUBLIC_URL: http://localhost:${TIDECLOAK_PORT:-8080}
     init: true
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     ports:
       - "127.0.0.1:${REDACTED_PORT:-3001}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - type: bind
-        source: ./data
+        source: ${REDACTED_DATA_DIR:-./data}
         target: /app/data
         bind:
           create_host_path: false
@@ -23,6 +43,40 @@ services:
       - /app/data/guest:rw,noexec,nosuid,nodev,size=512m,mode=0700,uid=${LOCAL_UID:-1000},gid=${LOCAL_GID:-1000}
     # Allow an in-flight job to finish during an intentional shutdown.
     stop_grace_period: 10m
+  tidecloak-volume-init:
+    # One-shot filesystem preparation, not a second TideCloak server.
+    image: tideorg/tidecloak-dev@sha256:06ad6dfc58a441c40cda99ce6800511846a27b6cfb47d9c084274470e10548db
+    profiles: [secure-history]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["chown 1000:0 /opt/keycloak/data/h2 && chmod 700 /opt/keycloak/data/h2"]
+    volumes:
+      - tidecloak:/opt/keycloak/data/h2
+    restart: "no"
+  tidecloak:
+    # Optional: normal `docker compose up` starts only Redacted.
+    # Pinned release: TideCloak 0.14.38 (public supported image, 2026-09-14).
+    image: tideorg/tidecloak-dev@sha256:06ad6dfc58a441c40cda99ce6800511846a27b6cfb47d9c084274470e10548db
+    profiles: [secure-history]
+    restart: "no"
+    mem_limit: 2g
+    depends_on:
+      tidecloak-volume-init:
+        condition: service_completed_successfully
+    env_file:
+      - path: ./.tidecloak/bootstrap.env
+        required: false
+    ports:
+      - "127.0.0.1:${TIDECLOAK_PORT:-8080}:8080"
+    volumes:
+      - tidecloak:/opt/keycloak/data/h2
+
 volumes:
   model:
     name: redacted-model
+  tidecloak:
+    name: redacted-tidecloak

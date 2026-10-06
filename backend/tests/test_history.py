@@ -7,16 +7,17 @@ import pytest
 
 from backend import app as service
 from backend.auth import VerifiedOwner, require_owner
-from backend.history import HistoryMetadata, HistoryStore, KINDS
+from backend.history import HistoryMetadata, HistoryStore, KINDS, LEGACY_KINDS
 
 BASE = 'http://127.0.0.1:3001'
 METADATA = {'source_type': 'docx', 'mode': 'redact', 'sensitivity': 50,
-            'counts': {'private_person': 1}, 'layout_preserved': True}
+            'counts': {'private_person': 1}, 'layout_preserved': True, 'protection_version': 2}
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(service, 'ROOT', tmp_path)
+    monkeypatch.setenv('PRIVACY_DATA_DIR', str(tmp_path))
     with TestClient(service.app, base_url=BASE) as client:
         yield client
     service.app.dependency_overrides.clear()
@@ -155,3 +156,76 @@ def test_restart_sweeps_legacy_orphans_even_after_migration_committed(tmp_path):
     HistoryStore(tmp_path)
     assert not orphan.exists()
     assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_version_two_requires_separate_filename_and_legacy_upgrade_preserves_artifacts(client):
+    inject_verified_test_principals()
+    client.headers['Authorization'] = 'Bearer fixture-a'
+    headers = {'Content-Type': 'application/octet-stream'}
+    for version in (1, 2):
+        record = client.post('/api/service/history', json=METADATA | {'protection_version': version}).json()
+        path = '/api/service/history/' + record['id']
+        originals = {kind: b'opaque-existing-' + kind.encode() for kind in LEGACY_KINDS}
+        for kind, payload in originals.items():
+            assert client.put(path + '/artifacts/' + kind, content=payload, headers=headers).status_code == 200
+        if version == 2:
+            assert client.post(path + '/commit').status_code == 409
+            assert client.put(path + '/artifacts/filename', content=b'opaque-name', headers=headers).status_code == 200
+        else:
+            assert client.put(path + '/filename', content=b'opaque-name', headers=headers).status_code == 409
+        assert client.post(path + '/commit').status_code == 200
+        client.headers['Authorization'] = 'Bearer fixture-b'
+        assert client.put(path + '/filename', content=b'opaque-name', headers=headers).status_code == 404
+        client.headers['Authorization'] = 'Bearer fixture-a'
+        assert client.put(path + '/filename', content=b'opaque-name').status_code == 415
+        assert client.put(path + '/filename', content=b'x' * (64 * 1024 + 1), headers=headers).status_code == 413
+        assert client.put(path + '/filename', content=b'opaque-name', headers=headers).json()['protection_version'] == 2
+        assert client.put(path + '/filename', content=b'overwrite-attempt', headers=headers).status_code == 200
+        assert client.get(path + '/artifacts/filename').content == b'opaque-name'
+        assert client.get(path).json()['protection_version'] == 2
+        for kind, payload in originals.items():
+            assert client.get(path + '/artifacts/' + kind).content == payload
+        assert client.put(path + '/artifacts/manifest', content=b'overwrite', headers=headers).status_code == 409
+
+
+@pytest.mark.parametrize('mode', ['redact', 'placeholder', 'synthetic'])
+def test_public_replacements_match_generated_output_without_original_values(client, mode):
+    from types import SimpleNamespace
+    from backend.documents import LABELS, replacement_plan
+    inject_verified_test_principals()
+    client.headers['Authorization'] = 'Bearer fixture-a'
+    text = ' '.join('PRIVATE' + str(i) for i in range(len(LABELS)))
+    spans = [SimpleNamespace(start=i*9, end=i*9+8, label=category) for i, category in enumerate(LABELS)]
+    _, counts, edits = replacement_plan(SimpleNamespace(text=text, detected_spans=spans), mode)
+    projection = [{'category': span.label, 'occurrence': 1, 'replacement': edit.text} for span, edit in zip(spans, edits)]
+    response = client.post('/api/service/history', json=METADATA | {'mode':mode, 'counts':counts, 'replacements':projection})
+    assert response.status_code == 201
+    record = client.get('/api/service/history/' + response.json()['id']).json()
+    assert record['replacements'] == projection
+    assert 'PRIVATE' not in str(record)
+    assert b'PRIVATE' not in service.history.path.read_bytes()
+
+
+def test_public_replacement_validation_and_owned_legacy_upgrade(client):
+    inject_verified_test_principals()
+    client.headers['Authorization'] = 'Bearer fixture-a'
+    item = {'category':'private_person', 'occurrence':1, 'replacement':'Alex Example 1'}
+    data = METADATA | {'mode':'synthetic'}
+    for bad in ([item | {'replacement':'Alice PRIVATE'}], [item | {'original':'Alice PRIVATE'}],
+                [item | {'occurrence':2}], [item, item], [], [item | {'category':'private_email'}]):
+        assert client.post('/api/service/history', json=data | {'replacements':bad}).status_code == 422
+    record = client.post('/api/service/history', json=data).json()
+    path = '/api/service/history/' + record['id']
+    assert client.put(path + '/replacements', json={'replacements':[item]}).status_code == 409
+    for kind in KINDS:
+        assert client.put(path + '/artifacts/' + kind, content=b'original-ciphertext', headers={'Content-Type':'application/octet-stream'}).status_code == 200
+    assert client.post(path + '/commit').status_code == 200
+    client.headers['Authorization'] = 'Bearer fixture-b'
+    assert client.put(path + '/replacements', json={'replacements':[item]}).status_code == 404
+    client.headers['Authorization'] = 'Bearer fixture-a'
+    assert client.put(path + '/replacements', json={'replacements':[item | {'replacement':'Alice PRIVATE'}]}).status_code == 422
+    assert client.put(path + '/replacements', json={'replacements':[item]}).json()['replacements'] == [item]
+    assert client.put(path + '/replacements', json={'replacements':[item | {'replacement':'Alex Example 2'}]}).json()['replacements'] == [item]
+    for kind in KINDS:
+        assert client.get(path + '/artifacts/' + kind).content == b'original-ciphertext'
+    assert b'Alice PRIVATE' not in service.history.path.read_bytes()

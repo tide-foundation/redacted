@@ -1,6 +1,7 @@
 from io import BytesIO
 from types import SimpleNamespace
 from zipfile import ZipFile
+from lxml import etree
 
 import pymupdf
 import pytest
@@ -18,6 +19,74 @@ def docx_bytes(doc):
     buffer = BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize('suffix', ['.pdf', '.docx'])
+@pytest.mark.parametrize('mode', ['redact', 'placeholder', 'synthetic'])
+@pytest.mark.parametrize('native', [True, False])
+def test_properties_are_removed_even_without_model_detections(tmp_path, suffix, mode, native, monkeypatch):
+    from backend.documents import export_with_fallback
+    marker = 'PROPERTY-ONLY-PRIVATE-ALICE-12345'
+    if suffix == '.pdf':
+        doc = pymupdf.open(); page = doc.new_page()
+        page.insert_text((50, 100), 'Ordinary public text.')
+        doc.set_metadata({'author': marker, 'title': marker, 'subject': marker,
+                          'keywords': marker, 'creator': marker, 'producer': marker})
+        info = int(doc.xref_get_key(-1, 'Info')[1].split()[0])
+        doc.xref_set_key(info, 'CustomPrivateProperty', f'({marker})')
+        doc.set_xml_metadata(f'<x:xmpmeta xmlns:x="adobe:ns:meta/"><private>{marker}</private></x:xmpmeta>')
+        data = doc.tobytes(); doc.close()
+    else:
+        doc = Document(); doc.add_paragraph('Ordinary public text.')
+        for field in ['author', 'last_modified_by', 'title', 'subject', 'keywords', 'comments', 'category']:
+            setattr(doc.core_properties, field, marker)
+        stream = BytesIO()
+        with ZipFile(BytesIO(docx_bytes(doc))) as archive, ZipFile(stream, 'w') as out:
+            for name in archive.namelist():
+                payload = archive.read(name)
+                if name == 'docProps/app.xml':
+                    root = etree.fromstring(payload)
+                    etree.SubElement(root, '{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}Company').text = marker
+                    payload = etree.tostring(root)
+                elif name == '[Content_Types].xml':
+                    root = etree.fromstring(payload)
+                    etree.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Override',
+                        PartName='/docProps/custom.xml', ContentType='application/vnd.openxmlformats-officedocument.custom-properties+xml')
+                    payload = etree.tostring(root)
+                elif name == '_rels/.rels':
+                    root = etree.fromstring(payload)
+                    etree.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship',
+                        Id='rIdPrivate', Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties', Target='docProps/custom.xml')
+                    payload = etree.tostring(root)
+                out.writestr(name, payload)
+            out.writestr('docProps/custom.xml', f'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"><property name="{marker}" pid="2"><value>{marker}</value></property></Properties>')
+        data = stream.getvalue()
+    source = load_document(data, suffix)
+    try:
+        assert marker not in source.text  # Properties are stripped, not model input.
+        result = SimpleNamespace(text=source.text, detected_spans=[])
+        sanitized, counts, edits = replacement_plan(result, mode)
+        assert not counts and not edits
+        if not native:
+            def fail(*args): raise DocumentError('Cannot preserve layout')
+            monkeypatch.setattr(source, 'save', fail)
+        folder = tmp_path / 'outputs'
+        assert export_with_fallback(sanitized, folder, source, suffix, edits) is native
+        with ZipFile(folder / 'sanitized.docx') as out:
+            assert all(marker.encode() not in out.read(name) for name in out.namelist())
+            if native and suffix == '.docx':
+                assert not any(n.startswith('docProps/') for n in out.namelist())
+                assert b'docProps/' not in out.read('_rels/.rels')
+        assert Document(folder / 'sanitized.docx').paragraphs[0].text == 'Ordinary public text.'
+        with pymupdf.open(folder / 'sanitized.pdf') as out:
+            assert not out.get_xml_metadata()
+            assert marker not in str(out.metadata)
+            assert all(marker not in out.xref_object(x) and marker.encode() not in (out.xref_stream(x) or b'')
+                       for x in range(1, out.xref_length()))
+            assert 'Ordinary public text.' in out[0].get_text()
+        assert marker not in (folder / 'sanitized.txt').read_text()
+    finally:
+        source.close()
 
 
 @pytest.mark.parametrize('mode', ['placeholder', 'synthetic'])

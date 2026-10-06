@@ -14,3 +14,6 @@ playwright-report/
 .claude/settings.local.json
 models/
 .venv-download/
+
+.tidecloak/
+*Zone.Identifier

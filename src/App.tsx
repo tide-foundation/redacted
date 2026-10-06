@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowRight, Check, ChevronDown, SlidersHorizontal, CircleHelp, FileText, LoaderCircle, Trash2, X } from 'lucide-react';
 import { api, isAborted } from './api';
+import { startVisiblePolling } from './polling';
 import type { DetectionReview, DocumentResult, GuestState, Mode, RevealedDetection } from './types';
 import { categoryLabels, modeLabels } from './types';
 import { HistoryPanel, unavailableHistoryProvider, useIdentity } from './history';
 import type { SecureHistoryProvider } from './history';
 import { ReviewPanel } from './ReviewPanel';
+import { fromManifest, correctionReview, type Correction } from './corrections';
 import { AccountMenu } from './AccountMenu';
 import { SecureHistoryPage } from './SecureHistoryPage';
+import { TideLinkComplete } from './TideLinkComplete';
+import { TideSetupPage } from './TideSetupPage';
 import { DisclaimerPage } from './DisclaimerPage';
 
 type Health = { model_installed: boolean; model_loaded: boolean; device: string };
@@ -33,6 +37,11 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
   const identityKey = identity.status === 'authenticated' ? `owner:${identity.ownerKey}` : identity.status;
   const [path, setPath] = useState(window.location.pathname);
   const [historyAvailable, setHistoryAvailable] = useState(false);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [savedRecord, setSavedRecord] = useState<DocumentResult | null>(null);
+  const [savedId, setSavedId] = useState<string | null>(null);
+  const autoSaveAttempt = useRef<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<Mode>('redact');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -46,6 +55,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [resultError, setResultError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState('');
   const [resetFailed, setResetFailed] = useState(false);
   const [drag, setDrag] = useState(false);
   const [preview, setPreview] = useState<{ id: string; text: string } | null>(null);
@@ -53,11 +63,19 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
   const [detailLoading, setDetailLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const progressSection = useRef<HTMLElement>(null);
+  const scrollToProgress = useRef(false);
+  useEffect(() => {
+    if (current && scrollToProgress.current) {
+      scrollToProgress.current = false;
+      progressSection.current?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+    }
+  }, [current]);
   const input = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const currentRef = useRef<DocumentResult | null>(null);
   const csrfRef = useRef('');
-  // Kept only in memory for a future authorised encrypt/save handoff. Never cached.
+  // Kept only in memory for the authorised encrypt/save handoff. Never cached.
   const retainedSource = useRef<{ documentId: string; file: File } | null>(null);
   const generation = useRef(0);
   const detailRequest = useRef<AbortController | null>(null);
@@ -79,6 +97,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
     detailRequest.current?.abort(); currentRequest.current?.abort(); mutationRequest.current?.abort();
     detailRequest.current = null; currentRequest.current = null; mutationRequest.current = null;
     retainedSource.current = null;
+    setSaving(false); setSavedId(null); autoSaveAttempt.current = null;
     currentRef.current = null;
     setCurrent(null); setExpiresAt(null); setPreview(null); setReview(null); setDetailLoading(false);
     setBusy(false); setDeleting(false); setChoosing(false); uploading.current = false;
@@ -93,12 +112,13 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
       if (controller.signal.aborted || version !== generation.current) return;
       const changedSession = csrfRef.current && next.csrf_token !== csrfRef.current;
       const replaced = currentRef.current && next.document?.id !== currentRef.current.id;
+      if (changedSession && currentRef.current) setSessionNotice('Your temporary session ended or the service restarted. Add your file again to continue.');
       if (changedSession || replaced) clearTransient();
       csrfRef.current = next.csrf_token; setCsrf(next.csrf_token);
       currentRef.current = next.document; setCurrent(next.document);
       if (next.document?.status === 'failed') retainedSource.current = null;
       setExpiresAt(next.document?.expires_at || next.expires_at); setResultError('');
-    } catch (e) { if (!controller.signal.aborted) setResultError((e as Error).message); }
+    } catch (e) { if (!controller.signal.aborted) { setResultError((e as Error).message); return false; } }
     finally { if (currentRequest.current === controller) currentRequest.current = null; if (!controller.signal.aborted) setLoading(false); }
   }, [clearTransient]);
   useEffect(() => {
@@ -109,23 +129,33 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
   }, [path]);
   useEffect(() => {
     const controller = new AbortController();
-    let checking = false;
-    const refreshHealth = async () => {
-      if (checking) return;
-      checking = true;
-      try { const next = await api<Health>('health', { signal: controller.signal }); if (!controller.signal.aborted) { setHealth(next); setConnection(''); } }
-      catch { if (!controller.signal.aborted) { setHealth(null); setConnection('Service unavailable.'); } }
-      finally { checking = false; }
-    };
-    void refreshHealth(); void refreshCurrent();
+    let failures = 0;
+    const stop = startVisiblePolling(async () => {
+      try {
+        const next = await api<Health>('health', { signal: controller.signal });
+        if (!controller.signal.aborted) { failures = 0; setHealth(next); setConnection(''); }
+      } catch {
+        if (!controller.signal.aborted) { failures++; setHealth(null); setConnection('Service unavailable.'); }
+      }
+    }, () => failures ? Math.min(60000, 15000 * 2 ** (failures - 1)) : 60000);
+    return () => { stop(); controller.abort(); };
+  }, []);
+  useEffect(() => {
+    let failures = 0;
+    return startVisiblePolling(async () => {
+      failures = await refreshCurrent() === false ? failures + 1 : 0;
+    }, () => failures ? Math.min(60000, 15000 * 2 ** (failures - 1)) : processing ? 2000 : 30000);
+  }, [processing, refreshCurrent]);
+  useEffect(() => {
+    const controller = new AbortController();
     api<{ secure_history: { available: boolean } }>('capabilities', { signal: controller.signal })
-      .then(next => { if (!controller.signal.aborted) setHistoryAvailable(next.secure_history.available); }).catch(() => setHistoryAvailable(false));
-    const timer = setInterval(() => { void refreshHealth(); void refreshCurrent(); }, 3000);
-    return () => { controller.abort(); clearInterval(timer); currentRequest.current?.abort(); mutationRequest.current?.abort(); detailRequest.current?.abort(); retainedSource.current = null; };
-  }, [refreshCurrent]);
+      .then(next => { if (!controller.signal.aborted) setHistoryAvailable(next.secure_history.available); })
+      .catch(() => { if (!controller.signal.aborted) setHistoryAvailable(false); });
+    return () => { controller.abort(); currentRequest.current?.abort(); mutationRequest.current?.abort(); detailRequest.current?.abort(); retainedSource.current = null; };
+  }, []);
   const resetGuestSession = useCallback(async () => {
     let token = csrfRef.current;
-    clearTransient(); setCsrf(''); csrfRef.current = ''; sessionTransition.current = true; setResetFailed(false);
+    clearTransient(); setSavedRecord(null); setCsrf(''); csrfRef.current = ''; sessionTransition.current = true; setResetFailed(false);
     resetRequest.current?.abort();
     const controller = new AbortController(); resetRequest.current = controller;
     try {
@@ -149,7 +179,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
     if (!expiresAt) return;
     const remaining = Date.parse(expiresAt) - Date.now();
     if (!Number.isFinite(remaining)) return;
-    const timer = setTimeout(() => { clearTransient(); void refreshCurrent(); }, Math.max(remaining, 0));
+    const timer = setTimeout(() => { clearTransient(); if (document.visibilityState !== 'hidden') void refreshCurrent(); }, Math.max(remaining, 0));
     return () => clearTimeout(timer);
   }, [expiresAt, clearTransient, refreshCurrent]);
   useEffect(() => {
@@ -173,7 +203,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
     if (!/\.(docx|pdf)$/i.test(next.name)) { setError('Choose a PDF or DOCX. Convert legacy .doc files to .docx first.'); return; }
     if (next.size > 20 * 1024 * 1024) { setError('Choose a file smaller than 20 MB.'); return; }
     if (!next.size) { setError('This file is empty.'); return; }
-    closeDetails(); setFile(next); setError('');
+    closeDetails(); setFile(next); setError(''); setSessionNotice('');
   }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -190,7 +220,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
       if (controller.signal.aborted || version !== generation.current) return;
       retainedSource.current = { documentId: result.id, file: source };
       const accepted: DocumentResult = { id: result.id, filename: source.name, created: new Date().toISOString(), mode: selectedMode, sensitivity: selectedSensitivity, source_type: suffix.slice(1), status: 'queued', counts: {} };
-      currentRef.current = accepted; setCurrent(accepted);
+      scrollToProgress.current = true; currentRef.current = accepted; setCurrent(accepted);
       setFile(null); if (input.current) input.current.value = '';
     } catch (e) {
       if (!isAborted(e) && version === generation.current) { setError((e as Error).message); setFile(null); if (input.current) input.current.value = ''; retainedSource.current = null; }
@@ -228,13 +258,43 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
     } catch (e) { if (!isAborted(e) && version === generation.current) setError((e as Error).message); }
     finally { if (detailRequest.current === controller) { detailRequest.current = null; setDetailLoading(false); } }
   }
+  const saveCurrent = useCallback(async () => {
+    const document = currentRef.current, retained = retainedSource.current;
+    if (!document || document.status !== 'complete' || identity.status !== 'authenticated' || identity.canWrite === false || !historyProvider.collectGuest || !retained || retained.documentId !== document.id) return;
+    const version = generation.current;
+    const controller = new AbortController(); mutationRequest.current = controller;
+    setSaving(true); setError('');
+    try {
+      const artifacts = await historyProvider.collectGuest(document.id, retained.file, controller.signal);
+      const saved = await historyProvider.save({ ...artifacts, metadata: document, filename: retained.file.name }, controller.signal);
+      if (!controller.signal.aborted && version === generation.current) {
+        setSavedRecord(saved); setSavedId(document.id); setHistoryRevision(value => value + 1);
+        try {
+          await api(`guest/documents/${document.id}`, { method: 'DELETE', headers: { 'X-CSRF-Token': csrfRef.current }, signal: controller.signal });
+          if (!controller.signal.aborted && version === generation.current) { clearTransient(); void refreshCurrent(); }
+        } catch (e) {
+          if (!isAborted(e) && version === generation.current) setError('Saved to encrypted history. The temporary working copy could not be cleared; trash the current result to remove it.');
+        }
+      }
+    } catch (e) {
+      if (!isAborted(e) && version === generation.current) setError('Could not save encrypted history. Your current downloads are still available. Retry while this result is open.');
+    } finally {
+      if (mutationRequest.current === controller) mutationRequest.current = null;
+      if (version === generation.current) setSaving(false);
+    }
+  }, [identity.status, historyProvider, clearTransient, refreshCurrent]);
+  useEffect(() => {
+    if (current?.status !== 'complete' || identity.status !== 'authenticated' || identity.canWrite === false || !historyProvider.collectGuest || autoSaveAttempt.current === current.id || !retainedSource.current) return;
+    autoSaveAttempt.current = current.id;
+    void saveCurrent();
+  }, [current, identity.status, historyProvider, saveCurrent]);
   const waiting = choosing ? 'Preparing file…' : busy ? 'Uploading…' : file && (!health || !csrf) && !connection ? 'Checking service…' : '';
   return <>
     <header className="topbar">
       <a className="brand" href="/" aria-label="Redacted home" onClick={event => { event.preventDefault(); navigate('/'); }}><img src="/brand/redacted-logo.svg" alt="Redacted" width="2048" height="455" /></a>
       <AccountMenu identity={identity} provider={historyProvider} available={historyAvailable} onInformation={() => navigate('/secure-history')}/>
     </header>
-    {path === '/disclaimer' ? <DisclaimerPage navigate={navigate}/> : path === '/secure-history' ? <SecureHistoryPage identity={identity} provider={historyProvider} available={historyAvailable} navigate={navigate}/> : <main>
+    {path === '/secure-history/linked' ? <TideLinkComplete/> : path === '/secure-history/setup' ? <TideSetupPage identity={identity} provider={historyProvider} navigate={navigate}/> : path === '/disclaimer' ? <DisclaimerPage navigate={navigate}/> : path === '/secure-history' ? <SecureHistoryPage identity={identity} provider={historyProvider} available={historyAvailable} navigate={navigate}/> : <main>
       <h1 className="sr-only">Redact a document</h1>
       <form onSubmit={submit}>
         <input ref={input} id="document" type="file" accept=".pdf,.docx" onClick={() => setChoosing(true)} onChange={e => choose(e.target.files?.[0])} className="file-input" disabled={busy || processing}/>
@@ -271,11 +331,12 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
         </div>
       </form>
       {connection && <div className="notice" role="status">Service unavailable.</div>}
+      {sessionNotice && <div className="notice" role="status">{sessionNotice}</div>}
       {health && !health.model_installed && <div className="notice" role="status">Model unavailable. See the README for setup.</div>}
       {error && <div className="notice error" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={17}/></button></div>}
-      <section className="library" aria-label="Current result"><div className="library-heading"><h2>Current result</h2></div>
-        {resultError ? <div className="empty" role="status">{resetFailed ? <><span>The working session could not be reset.</span><button className="text-button" onClick={() => void resetGuestSession()}>Retry reset</button></> : 'Could not load the current result.'}</div> : loading ? <div className="empty" role="status"><LoaderCircle className="spin" size={18}/><span>Loading…</span></div> : !current ? <div className="empty">No current file.</div> : <>
-          <article className="document-row"><div className="doc-icon"><FileText size={22}/></div><div className="doc-info">
+      <section className="library" aria-label="Files"><div className="library-heading"><h2>Files</h2></div>
+        {resultError ? <div className="empty" role="status">{resetFailed ? <><span>The working session could not be reset.</span><button className="text-button" onClick={() => void resetGuestSession()}>Retry reset</button></> : <><span>Connection interrupted. Reconnecting to your temporary result…</span><button className="text-button" onClick={() => void refreshCurrent()}>Retry now</button></>}</div> : loading ? <div className="empty" role="status"><LoaderCircle className="spin" size={18}/><span>Loading…</span></div> : !current ? (identity.status !== 'authenticated' ? <div className="empty">No files yet.</div> : null) : <>
+          <article ref={progressSection} className="document-row"><div className="doc-icon"><FileText size={22}/></div><div className="doc-info">
             <h3><span className={`document-name${processing ? ' is-processing' : ''}`} title={current.filename || undefined}><span className="filename-text">{current.filename || `Document ${current.id.slice(0, 8)}`}</span>{processing && <><span className="redaction-loader" aria-hidden="true"/><span className="sr-only" role="status">{current.status === 'queued' ? 'Queued' : 'Processing'}</span></>}</span><span className="mode-pill">{modeLabels[current.mode]?.[current.status === 'complete' ? 1 : 0] || current.mode}</span>{current.status === 'failed' && <span className="status failed">Failed</span>}</h3>
             <p>{new Date(current.created).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
             {current.status === 'complete' && <div className="counts">{Object.entries(current.counts).length ? Object.entries(current.counts).map(([key, value]) => <span key={key}>{value} {categoryLabels[key]?.toLowerCase() || key}</span>) : <span>No detections</span>}</div>}
@@ -283,17 +344,26 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
           </div><div className="doc-actions">
             {current.status === 'complete' && <><button className="text-button" onClick={() => openDetail('preview')}>Preview</button><button className="text-button" onClick={() => openDetail('review')}>Review detections</button>
               <div className="downloads">{(current.source_type === 'pdf' ? ['pdf', 'docx', 'txt'] : ['docx', 'pdf', 'txt']).map(ext => <a key={ext} title={current.source_type === ext && current.layout_preserved ? 'Original layout' : 'Rebuilt text'} href={`/api/service/guest/documents/${current.id}/download/${ext}`} aria-label={`Download ${ext.toUpperCase()} for document ${current.id.slice(0, 8)}`}><ArrowDownToLine size={13}/>{ext.toUpperCase()}</a>)}</div></>}
-            <button className="delete" onClick={remove} disabled={processing || deleting} aria-label={`Delete document ${current.id.slice(0, 8)} and all its output files`} title="Delete document and all output files">{deleting ? <LoaderCircle className="spin" size={17}/> : <Trash2 size={17}/>}</button>
+            <button className="delete" onClick={remove} disabled={processing || deleting || saving} aria-label={`Delete document ${current.id.slice(0, 8)} and all its output files`} title="Delete document and all output files">{deleting ? <LoaderCircle className="spin" size={17}/> : <Trash2 size={17}/>}</button>
           </div></article>
-          {current.status === 'complete' && <p className="history-prompt">Keep this result? <a href="/secure-history" onClick={event => { event.preventDefault(); navigate('/secure-history'); }}>Secure your history.</a></p>}
+          {current.status === 'complete' && identity.status !== 'authenticated' && <p className="history-prompt"><a href="/secure-history" onClick={event => { event.preventDefault(); navigate('/secure-history'); }}>Set up encrypted history for future uploads.</a></p>}
+          {current.status === 'complete' && identity.status === 'authenticated' && <p className="history-prompt" role="status">{saving ? 'Encrypting and saving…' : savedId === current.id ? 'Saved to your encrypted history.' : retainedSource.current ? <button className="text-button" onClick={() => void saveCurrent()}>Retry saving encrypted history</button> : 'Upload again to save the original and result to history.'}</p>}
         </>}
         {detailLoading && <p className="empty" role="status"><LoaderCircle className="spin" size={18}/>Loading details…</p>}
-        {review && current && <ReviewPanel key={current.id} review={review} onClose={closeDetails} onReveal={async signal => {
+        {review && current && <ReviewPanel key={current.id} review={review} onClose={closeDetails} correctionAccess={!saving ? {
+          load: async signal => fromManifest(await api(`guest/documents/${current.id}/correction`,{signal})),
+          save: async (value,signal) => {
+            const saved=await api<Correction>(`guest/documents/${current.id}/correction`,{method:'PUT',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfRef.current},body:JSON.stringify(value),signal});
+            if(!signal.aborted){setReview(correctionReview(saved,review.scan_report));await refreshCurrent();}
+            return saved;
+          },
+        } : undefined} onReveal={async signal => {
           const result = await api<{ values: RevealedDetection[] }>(`guest/documents/${current.id}/revealed-detections`, { signal });
           return result.values;
         }}/> }
+      {historyAvailable && identity.status === 'authenticated' && <HistoryPanel key={identity.ownerKey} provider={historyProvider} identity={identity} refreshKey={historyRevision}
+        hasCurrent={Boolean(current)} excludeId={current && savedId === current.id ? savedRecord?.id : undefined} savedRecord={savedRecord}/>}
       </section>
-      {historyAvailable && identity.status === 'authenticated' && <HistoryPanel key={identity.ownerKey} provider={historyProvider} identity={identity}/>}
     </main>}
     <footer className="site-footer">
       <span>A Tide community project · <a href="https://github.com/tide-foundation/redacted" target="_blank" rel="noopener noreferrer">GitHub</a></span>

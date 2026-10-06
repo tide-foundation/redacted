@@ -64,18 +64,16 @@ class WordDocument:
                or 'vbaProject' in name for name in self.files):
             raise DocumentError('Embedded objects, charts, SmartArt and macros are unsupported. Remove them before uploading.')
         self.roots = {}
-        removed = {name for name in self.files if name.startswith(('customXml/', 'docProps/thumbnail'))
+        removed = {name for name in self.files if name.startswith(('customXml/', 'docProps/'))
                    or re.match(r'word/(comments[^/]*|people)\.xml$', name)}
         removed_types = ('comments', 'commentsextended', 'commentsextensible', 'commentsids',
-                         'people', 'customxml', 'customxmlprops', 'thumbnail')
+                         'people', 'customxml', 'customxmlprops', 'thumbnail',
+                         'core-properties', 'extended-properties', 'custom-properties')
         for name, payload in self.files.items():
             if name in removed or not name.endswith(('.xml', '.rels')):
                 continue
             root = parse_xml(payload)
             self.roots[name] = root
-            if name.startswith('docProps/'):
-                for child in list(root):
-                    root.remove(child)
             if name.endswith('.rels'):
                 for child in list(root):
                     kind = child.get('Type', '').rsplit('/', 1)[-1].lower()
@@ -214,6 +212,8 @@ class PdfDocument:
         # Strip metadata, attachments, links and scripts. Keep text for detection,
         # including invisible OCR text, whose image pixels must also be redacted.
         doc.scrub(hidden_text=False, redactions=True, redact_images=2)
+        # set_metadata({}) only clears standard keys. Drop custom Info keys too.
+        doc.xref_set_key(-1, 'Info', 'null')
         doc.set_toc([])
         parts, offset, line_id = [], 0, 0
         for page in doc:
@@ -282,7 +282,7 @@ class PdfDocument:
                                min(first.origin[1], rect.y1 + font.descender * size))
                 color = tuple(((first.color >> shift) & 255) / 255 for shift in (16, 8, 0))
                 page.insert_text((rect.x0, baseline), replacement, fontsize=size, fontname=fontname, color=color)
-        self.document.set_metadata({})
+        self.document.xref_set_key(-1, 'Info', 'null')
         self.document.del_xml_metadata()
         self.document.save(path, garbage=4, deflate=True, clean=True)
 

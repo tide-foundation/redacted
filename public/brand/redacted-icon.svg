@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="REDACTED-final-outlined" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 555.2 446.4">
+  <!-- Generator: Adobe Illustrator 30.8.2, SVG Export Plug-In . SVG Version: 2.1.4 Build 7)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #141414;
+      }
+    </style>
+  </defs>
+  <g id="Redaction-bars">
+    <rect id="Upper-redaction-bar" class="st0" x="38" y="249.4" width="256" height="167"/>
+    <rect id="Lower-redaction-bar" class="st0" x="38" y="38.4" width="480" height="167"/>
+  </g>
+</svg>

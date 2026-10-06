@@ -47,7 +47,7 @@ try {
   await page.waitForFunction(() => !document.querySelector('.redact-button').disabled);
   assert.equal(await page.locator('.file-wait-ring').count(), 0);
   // Guest session setup completes independently of delayed model readiness.
-  assert.equal(await page.getByText('No current file.', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('No files yet.', { exact: true }).count(), 1);
   const cancelChooser = page.waitForEvent('filechooser');
   await page.locator('.dropzone').click();
   await cancelChooser;
@@ -64,7 +64,7 @@ try {
   await page.getByRole('button', { name: 'REDACT', exact: true }).waitFor();
   assert.equal(await page.locator('.file-wait-ring').count(), 0);
   assert.equal(await page.getByText(uploadName, { exact: true }).count(), 0);
-  await page.getByText('No current file.').waitFor();
+  await page.getByText('No files yet.').waitFor();
   await input.setInputFiles({ name: 'invalid.txt', mimeType: 'text/plain', buffer: Buffer.from('invalid') });
   await page.locator('.notice[role=alert]').waitFor();
   assert.equal(await page.locator('.file-wait-ring').count(), 0);

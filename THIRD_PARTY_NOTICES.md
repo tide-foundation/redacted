@@ -62,7 +62,11 @@ The compiled browser application includes these components:
 | React 19.2.4, React DOM 19.2.4 and Scheduler 0.27.0 | MIT; Meta Platforms, Inc. and affiliates | [React-MIT.txt](public/licenses/React-MIT.txt) |
 | Lucide React 0.468.0 | ISC, with the upstream Cole Bemis / Feather MIT attribution retained | [Lucide-ISC.txt](public/licenses/Lucide-ISC.txt) |
 
-These files are copied from the installed packages without editing their notices.
+| docx | MIT | [docx-MIT.txt](public/licenses/docx-MIT.txt) |
+| pdf-lib | MIT | [pdf-lib-MIT.txt](public/licenses/pdf-lib-MIT.txt) |
+| @pdf-lib/fontkit | MIT | [upstream README and licence declaration](public/licenses/fontkit-README.md) |
+
+These files retain the installed upstream notices. The fontkit package and repository declare MIT in their README and package metadata but do not ship a standalone licence file; its unmodified README is retained here.
 Vite includes them in the static build, where they are available at
 `/licenses/React-MIT.txt` and `/licenses/Lucide-ISC.txt`. React, React DOM and
 Scheduler supply identical licence texts in these versions. Upstream sources:
@@ -102,3 +106,18 @@ Build and test tools retain their own licences even though Node and those tools
 are not production servers. Examples include Vite under MIT, and TypeScript and
 Playwright under Apache-2.0. Nothing in this file grants rights beyond the
 applicable component licences.
+
+## Optional Tide integration
+
+The browser integration uses `@tidecloak/js` 0.14.34 and its locked Tide
+cryptographic dependencies. They retain their **Tide Community Open Code
+License**, which is not MIT. The package's unmodified full notice is served at
+[public/licenses/Tide-Community-Open-Code.txt](public/licenses/Tide-Community-Open-Code.txt).
+The SDK relay page and its CSP are copied together from the installed SDK during
+build; they are Tide-supplied assets. Dependency sources and versions are recorded
+in `package-lock.json` and the [setup guide](docs/tidecloak-setup.md).
+
+TideCloak runs in its separately distributed upstream container, pinned by digest
+in `compose.yaml`; its licences and notices remain in that image. Adding the
+integration does not relicense Tide software under Redacted's MIT grant. Review
+all applicable component licences before redistributing a combined deployment.

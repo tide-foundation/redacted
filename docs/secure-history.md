@@ -1,97 +1,90 @@
-# Guest lifecycle and secure-history preparation
+# Guest lifecycle and secure history
 
-## Current status
+## Integration status
 
-The application retains the single FastAPI runtime and static React/Vite frontend. Guest isolation, ephemeral working results, manifests, scan reports, owner-scoped opaque persistence and secure-history UI boundaries are implemented as the preparation stages. Real TideCloak authentication and Tide self-encryption/decryption are **not configured**. They must be implemented using Raziel MCP before secure retention can be enabled.
+The application uses one FastAPI runtime and a static React/Vite frontend. Optional TideCloak setup, the browser encryption adapter and server-side token/proof verification are implemented. **Live realm licensing, admin account linking, governance approvals and real-account encryption tests still need to be completed on each installation.** See the [owner setup guide](tidecloak-setup.md) and [implementation brief](tidecloak-integration.md).
 
-There is no production demo identity, local-account replacement, unverified JWT parser or plaintext encryption fallback. Unauthenticated history requests fail closed; supplying credentials cannot activate a provider. Test dependency overrides supply isolated verified-owner fixtures, never production identities. Current guest operations do not require Tide infrastructure.
+Guest mode needs no Tide infrastructure. There is no production demo identity, substitute local-account system, unverified JWT fallback or plaintext secure-history fallback. Raziel's MCP guidance and the installed SDK source informed the integration; the SDK assets and server image are pinned.
 
 ## Guest lifecycle
 
-`GET /api/service/guest/current` establishes an opaque random HttpOnly, SameSite=Strict browser-session cookie and returns a CSRF token. The server retains only a digest of the session token. A session can access only its own current job/result. Mutations require the CSRF token as well as the existing local Host/Origin/Fetch Metadata checks. HTTPS adds Secure to the cookie; local HTTP remains supported.
+`GET /api/service/guest/current` establishes a random HttpOnly, SameSite=Strict session cookie and returns a CSRF token. The server retains only a digest of the session token. Each session can access one current job/result. Mutations require its CSRF token, and local Host/Origin/Fetch Metadata checks remain in place. HTTPS adds Secure to cookies; localhost HTTP is supported.
 
-Upload bytes are buffered transiently, then passed through the existing PDF/DOCX detector and renderer. No original source file is deliberately saved. The selected browser `File` can remain in memory for a later protected save, but is never written to localStorage or IndexedDB. Full detection manifests stay in bounded server memory. The default guest review response omits original values and exact offsets/lengths. An explicit Reveal values request returns the current document’s detected originals to the same guest session in one response. One control reveals or hides the entire review; the three columns retain their widths as text wraps. Guest originals remain unencrypted in temporary memory; a black bar is a visibility control, not encryption. Hide, close, tab hiding, expiry and session changes cancel pending requests and clear revealed values.
+Source bytes, filenames and full detection manifests stay in transient server memory. The browser keeps the selected source `File` in memory until saving/cleanup. Guest outputs use Docker's 512 MiB tmpfs; direct Python uses a temporary directory with cleanup. Guest text and images may still contain sensitive information. Concealing values in the interface is not encryption.
 
-The optional `X-Document-Name` upload header carries a percent-encoded UTF-8 filename. A validated basename is held only in the guest record in RAM, shown in the file list, and never placed in URLs, logs or SQLite. One current result replaces the old finished result. The registry admits at most 64 sessions; retained outputs are capped at 128 MiB per result and 256 MiB in total before publication. An in-progress render can temporarily exceed those application limits; Docker’s 512 MiB tmpfs is the hard ceiling. Concurrent work in one session is rejected. The deadline is one hour from acceptance of each upload, not from completion; polling does not renew it. Replacement, explicit deletion, session reset, expiry and restart remove results. A periodic sweep cleans abandoned sessions, and startup clears orphaned temporary files. Running work is invalidated when its session disappears and cannot publish a late result. A download already authorized and underway can finish before its temporary file is removed.
+The registry admits at most 64 sessions. Published outputs are capped at 128 MiB per result and 256 MiB total; the Docker tmpfs is the hard limit during rendering. Results expire one hour after upload, regardless of polling or processing duration. Replacement, trash, reset, expiry and restart remove them. A download already underway can finish before cleanup. Host swap, snapshots, browser-restored sessions and user downloads are outside the deletion guarantee.
 
-Compose uses a 512 MiB tmpfs at `/app/data/guest`; it is a ceiling, not reserved memory. Direct Python uses `data/guest/` with explicit cleanup. The source/parser/model can observe plaintext in RAM; generated guest files can still contain confidential text or images. Host swap, snapshots and user downloads are outside the deletion guarantee. Browser closure is not a reliable server signal; expiry is the backstop, including browsers that restore session cookies.
+The guest review projection excludes original values and exact offsets. One Reveal/Hide control requests all originals for the current session. Hide, close, tab hiding, expiry and identity changes cancel pending requests and clear displayed values. The individual-value endpoint remains for compatibility.
 
-## Durable history model
+## Durable history and protection
 
-SQLite remains at `data/documents.sqlite3`. `history_documents` requires an internal `owner_id`, UUID, timestamp, status, draft expiry, constrained metadata and protection version. `history_artifacts` stores opaque binary values keyed by document and kind; foreign-key cascading deletion keeps metadata and artifacts together.
+SQLite is at `data/documents.sqlite3`. `history_documents` contains a verified internal owner identifier, UUID, timestamp, state, draft expiry, protection version and constrained metadata. `history_artifacts` stores opaque binary payloads; cascading deletion removes them with the document.
 
-The artifact kinds are `source`, `manifest`, `output_pdf`, `output_docx`, and `output_txt`. All five must exist before commit. A record is invisible to the history list until committed, and committed payloads are immutable. Changed redaction settings create a new history record. Incomplete drafts expire after 15 minutes. Draft expiry starts at creation and is not renewed by uploads. Current limits are 64 MiB per artifact, 192 MiB per document and 100 retained/draft documents per owner. These local-app limits can be revisited with the final encrypted envelope overhead and hosted quotas.
+New documents use protection version 2 and require six protected artifacts: `filename`, `source`, `manifest`, `output_pdf`, `output_docx`, and `output_txt`. The browser applies Tide self-encryption with the `history` tag before uploading each one. Protected plaintext also binds the document ID, artifact kind and owner, so a swapped artifact is rejected after decryption. The filename is encrypted separately from the manifest, which includes originals, replacements and positions. No server decryption key is installed.
 
-Every repository method requires a verified-owner value, and every document/artifact lookup checks that owner. Browser input cannot set ownership. The future identity adapter will derive it only from verified authentication; no Tide claim convention is assumed now. Opaque-byte handling cannot establish that arbitrary bytes are cryptographically protected. Real protection must be enforced by the final provider/envelope integration before these endpoints become available.
+Unencrypted metadata is limited to source type, mode, sensitivity, category counts, layout status, warning codes and generated replacement values. The server validates replacement text against the app’s fixed Mask, Label and synthetic templates, and validates occurrence counts; it rejects originals, offsets and arbitrary text in that projection. Counts, timestamps and repeated synthetic values still reveal limited structure. The storage API treats artifacts as opaque; it cannot prove that an arbitrary authenticated client's bytes are ciphertext. Encryption enforcement is in the shipped browser provider, with a test that inspects every uploaded artifact and rejects plaintext persistence regressions.
 
-Searchable metadata permits source type, mode, sensitivity, category counts, native/fallback state and constrained warning codes. Filenames, detected values, exact spans and arbitrary warning/error text are excluded. Counts and timestamps still reveal limited information; metadata is minimized rather than claimed to reveal nothing. Original filenames belong inside the future encrypted manifest.
+Drafts are hidden from listings until all required artifacts commit. Completed artifacts are immutable. A narrow owner-scoped upgrade can add a protected filename to a version 1 document without modifying any existing artifact. Incomplete drafts expire after 15 minutes without renewal. Limits are 64 MiB per artifact, 192 MiB per document and 100 retained/draft documents per owner. Interrupted saves attempt to delete their draft. After a successful save, Redacted deletes the guest working copy; failed cleanup is shown explicitly.
 
-## API boundaries
+The backend verifies EdDSA access tokens using trusted public keys installed by the owner. It checks issuer, audience, client, expiry and personal-history permissions. ES256 DPoP verification checks signature, key binding, method, URL, token hash, nonce and replay. Owner IDs are derived from verified issuer/subject, never supplied by the client. Every repository operation is owner-scoped.
 
-All routes below use `/api/service`. Sensitive responses have `Cache-Control: no-store`. Filesystem paths are never returned.
+## Browser behavior
 
-| Route | Purpose and authorization |
+Guest mode remains the primary upload/settings/result experience. The account icon opens the introduction at `/secure-history` while unconfigured. Owner instructions live separately at `/secure-history/setup`. Configured installations offer Sign in or Sign out; signed-in users have no redundant settings link. Login requires a fresh working session. Download a guest result before signing in, then upload again; plaintext is never persisted to bridge a full-page login.
+
+Signed-in results save automatically into one Files list, newest first, alongside the current working file. A detection report expands immediately below its own record. Count badges use safe category metadata. Reprocessing is not supported.
+
+Listing metadata and opening Review detections do not decrypt the detection manifest. Each visible filename decrypts its own small artifact. Review uses category counts and generated replacement metadata without decrypting originals. The replacement column stays visible when originals are hidden. Reveal values decrypts the complete manifest for that document in one Tide call, returning all original values together; it does not decrypt every record in the history. Original and each output download decrypt only their requested artifact. Filename and value skeletons occupy the eventual text positions while waiting; download actions show an in-place progress animation.
+
+A per-tab memory cache retains decrypted blobs for the signed-in session, with a 256 MiB least-recently-used limit. Concurrent requests for the same artifact share a decryption; repeat actions reuse it until eviction. HTTP downloads may run in parallel, but Tide SDK encryption/decryption calls use one queue per provider. The pinned RequestEnclave routes replies by operation type rather than a unique request ID, so overlapping decrypt calls can consume the same response and plaintext buffer. Each detection manifest still decrypts all originals for its document in one operation. Queued work is checked for cancellation and identity changes before entering the enclave; failed operations do not block later requests. Hide, close and tab hiding clear displayed values and cancel the UI action without discarding the session cache. Logout, identity changes, authentication failure and reload discard the cache; deletion discards that document's entries. Nothing is saved to browser storage. Cancelled identity operations cannot repopulate the cache with late decryption results.
+
+Version 1 documents remain readable. Their combined manifest contains the filename and detected originals, so they initially show a document ID instead of automatically decrypting that manifest. The first explicit Reveal can add a separate encrypted filename and upgrade the format to version 2, preserving existing ciphertext. If that optional upgrade fails, Reveal still works and a later Reveal can retry it. Old Mask and Label replacements are reconstructed directly from their categories. Older Replace documents need one explicit Reveal before their actual synthetic values can be published as validated metadata; no automatic manifest decryption is used to obtain them.
+
+Access tokens and document plaintext are not saved to browser persistence. The SDK uses browser storage for its OAuth state and DPoP key lifecycle, not document content. Logout is propagated across tabs and clears identity state; SDK logout clears its proof keys and enclave. Revealed data and pending operations are fenced against identity changes. JavaScript/Python memory release is not guaranteed physical erasure.
+
+Health checks run once on load and every 60 seconds while visible. Working-document checks run every 2 seconds during processing and every 30 seconds otherwise. Polling pauses in hidden tabs and refreshes immediately on returning, focus or reconnect. Failures back off to 15, 30 and then 60 seconds; a slow request never creates overlapping requests. Explicit upload/delete/reset actions and local expiry still update immediately.
+
+## Relevant APIs
+
+All API routes use `/api/service` and return `Cache-Control: no-store`.
+
+| Route | Boundary |
 | --- | --- |
-| `GET /health` | Local service/model status |
-| `GET /capabilities` | Truthful secure-history availability |
-| `GET /guest/current` | Bootstrap/read the cookie-scoped working result and CSRF token |
-| `DELETE /guest/current` | CSRF-protected session reset; invalidate active work and clear cookie |
-| `POST /guest/documents` | CSRF-protected raw PDF/DOCX upload with mode/type/sensitivity |
-| `GET /guest/documents/{id}/preview` | Session-scoped generated text |
-| `GET /guest/documents/{id}/review` | Session-scoped concealed detections and objective report |
-| `GET /guest/documents/{id}/revealed-detections` | Explicit reveal of current document originals from guest RAM; same-session authorization |
-| `GET /guest/documents/{id}/detections/{category}/{occurrence}` | Explicit reveal of one original value from current guest RAM; same-session authorization |
-| `GET /guest/documents/{id}/protected-manifest` | Transient full manifest handoff; requires both verified owner and current guest session, unavailable before integration |
-| `GET /guest/documents/{id}/download/{format}` | Session-scoped generated PDF/DOCX/TXT |
-| `DELETE /guest/documents/{id}` | CSRF-protected removal of the finished working result |
-| `GET, POST /history` | Verified-owner listing or draft creation |
-| `GET, DELETE /history/{id}` | Verified-owner record access/removal |
-| `PUT, GET /history/{id}/artifacts/{kind}` | Verified-owner opaque binary upload/retrieval |
-| `POST /history/{id}/commit` | Verified-owner publication after all protected artifacts exist |
+| `GET /health`, `/capabilities` | Local service status and configuration availability |
+| `GET /tide/status`, `/tide/config` | Optional-service status and installed public adapter |
+| `POST /tide/setup/unlock` | One-use terminal code, 30-minute expiry |
+| `POST /tide/setup/configure` | Owner setup cookie + CSRF; disabled after installation |
+| `GET /identity` | Verified Tide identity and request proof |
+| `GET/DELETE /guest/current` | Session read/reset; CSRF on reset |
+| `POST /guest/documents` | Session + CSRF; bounded raw file upload |
+| `GET /guest/documents/{id}/preview`, `/review`, `/revealed-detections`, `/download/{format}` | Current-session result only |
+| `GET /guest/documents/{id}/protected-manifest` | Verified Tide identity plus current guest session |
+| `DELETE /guest/documents/{id}` | Current-session deletion + CSRF |
+| `GET/POST /history` | Verified owner listing / bounded draft creation |
+| `GET/DELETE /history/{id}` | Verified owner read/deletion |
+| `PUT/GET /history/{id}/artifacts/{kind}` | Verified owner opaque artifact transfer |
+| `POST /history/{id}/commit` | Verified owner; six artifacts required for version 2, five for version 1 |
+| `PUT /history/{id}/filename` | Verified owner; add a bounded protected filename to a completed version 1 record |
+| `PUT /history/{id}/replacements` | Verified owner; add validated generated replacements to an older completed record, once |
 
-The old global `/documents` routes are removed. Unknown API routes remain JSON 404s. `/secure-history` and `/disclaimer` are explicit UI entry points; static serving never exposes `data/` or model files.
+The SDK's enclave relay has a separate, issuer/client-bound route and its exact upstream CSP. Only that embed and top-level app navigation may cross the usual Fetch Metadata boundary; cross-site API requests remain rejected.
 
-The processing boundary is deliberately transient and separate from durable history. Final authenticated reprocessing can retrieve ciphertext, decrypt it in the browser, and submit the resulting source through the working-document pipeline. A narrow verified-owner plus current-session manifest handoff is prepared for the final secure-save flow and currently fails closed. No server-side decryption is provided. Guest reveal reads only the current guest’s RAM manifest; it never decrypts or accesses durable history.
+## Validation and limits
 
-## Manifests and report limits
+Automated verification includes the existing document/guest/history suite, real-signature JWT/DPoP rejection tests, owner isolation, one-use setup tests and browser lifecycle tests. A separate browser fixture uses actual WebCrypto to test the application's storage boundary, swapped-artifact rejection, interrupted-save cleanup and late-decryption cancellation. That fixture is not a live Tide cryptography test.
 
-The manifest is built from the exact validated edit plan used to render the output, including the actual synthetic replacements. It preserves categories, originals, replacements, occurrence order and canonical extracted-text spans. These offsets refer to extracted Unicode text, not original bytes or reliable visual coordinates. It records mode, sensitivity, input format, native/fallback result and applicable warnings. It is versioned so later page/part mapping can be added deliberately.
+Real Tide sign-in, default-role approval, cross-user encryption isolation, enclave branding, recovery after sign-out and second-user self-registration remain live acceptance checks. Never present fixture success as proof of these. The app remains local-only; exposing it remotely requires explicit origin, HTTPS, proxy, quota and operational changes.
 
-The pinned OPF public result has no supported per-detection confidence score. The scan report shows sensitivity, counts/categories, input format, layout path, warnings and OCR/image limitations. It reports that OCR was not performed. Detection counts are not accuracy, and sensitivity is not confidence. Existing native sanitization protections and clean rewrite fallback remain in place. A source file or image can contain unsupported/unscanned information; redaction never guarantees anonymization.
+Legacy unowned history is removed on upgrade and is never assigned to a new user or claimed to be encrypted. Back up current owned ciphertext and TideCloak state together; see the setup guide. The [storage ADR](adr/001-secure-history-storage.md) records why source and cached outputs are protected independently.
 
-## Frontend boundary
+## Review corrections
 
-The main upload/settings/redact/result workflow remains primary. A restrained circular user icon and post-result prompt lead to `/secure-history` while Tide is unconfigured. Once a real provider is available, the icon opens Sign in when signed out or Sign out when authenticated. The REDACT button keeps its label on disabled hover while its arrow turns toward the upload field. During processing a looping black rectangle sweeps over the displayed filename, with a static reduced-motion alternative. The information page explains retention, detection review, authorized reveal/recovery and revisiting results before introducing TideCloak. Both modes are free. Real sign-in, secure saving and protected-history decryption remain unavailable until a real provider is installed; guest Reveal/Hide works immediately.
+Open **Review detections → Review and correct**. Original shows the extractable text with dotted underlines. Select text and choose **Hide selected text**, or click/focus an underline and press Enter/Space to unhide only that occurrence. Overlapping detections are absorbed by a manual selection. **Added by you** groups manual spans. Distinct values share numbered labels; names with exactly one unambiguous longer detected name share its label. Mask, Label and Replace modes remain available. Nothing is sent until **Save changes**.
 
-The provider interface separates identity state, authenticated history access and future browser protection/decryption from components. Original values are concealed by default and revealed together using one panel control. Future protected-history originals and filenames must be decrypted in the browser, and filenames must stay in the protected manifest rather than durable searchable metadata. Hide/close, navigation, identity changes, expiry and logout must abort pending sensitive requests and clear decrypted state; object URLs are revoked after use. Plaintext sources/manifests and tokens are not put in persistent frontend storage. JavaScript and Python memory release is not guaranteed physical erasure.
+Review spans use UTF-16 browser string offsets. The browser validates ordering, bounds, non-overlap and surrogate-pair boundaries whenever reading or saving a correction, and converts legacy detector code-point offsets explicitly. Older manifests can reconstruct their original text from their exact replacements and the decrypted text output; inconsistent data is rejected.
 
-## Remaining final phase: Raziel-guided integration
+Guest corrections remain in the expiring session. The server checks the original text and span boundaries, regenerates downloads, and swaps the result only after all exports succeed. A download in progress blocks replacement until it finishes. Guest review does not make a durable history record.
 
-Raziel MCP is required by the project brief and is not exposed in the current tool session. Do not infer Tide SDK methods, token claims or ciphertext formats from the prepared interfaces. Once connected, use it to implement and test frontend authentication, token lifecycle, backend EdDSA-compatible verification, Tide self-encrypt/self-decrypt, roles, binary handling, logout and errors.
+History corrections are encrypted in the browser with the same Tide `history` tag and owner/document binding as the source. One encrypted bundle contains the review (original text, spans, labels and redacted text) and regenerated PDF/DOCX/TXT outputs. The server atomically replaces this opaque bundle in `history_corrections`. Only distinct-detail count, revision, verified updater and timestamp are additional plaintext metadata. `history_review_audit` records each save's revision and count, never contents. Original artifacts remain immutable and recoverable; download endpoints in the browser adapter use the latest reviewed bundle. Saved corrections rebuild a text layout, without original images or formatting. The browser PDF export rejects unsupported font characters instead of silently losing them; a failed export/encryption leaves the previous revision untouched.
 
-The final flow must encrypt source, manifest **and cached outputs before durable retention**. Original recovery and ordinary downloads should decrypt in the browser without sending plaintext to the backend. Reprocessing necessarily sends plaintext for transient processing. Clear temporary artifacts after a successful protected save, and recover gracefully from interrupted encryption/upload/commit. No Forseti or delegated server decryption is planned.
-
-A browser-memory source survives in-app navigation but not a full-page authentication redirect or reload. Raziel must guide that handoff; require a fresh source selection when no source remains, or add a bounded authorized RAM handoff if the verified flow requires one. Never silently substitute persistent browser storage or a plaintext durable source.
-
-Required final tests include invalid/expired/wrong-issuer/audience/signature tokens, owner isolation under actual verified identities, real self-encryption/decryption round trips, wrong-user denial, logout clearing, interrupted saves, original recovery and transient reprocessing cleanup. Do not describe these as passed before the real integration exists.
-
-## Migration and deployment
-
-Upgrading from a legacy version drops the global unowned document table and removes its UUID output directories. Export any legacy files you need before upgrading. The migration never assigns old data to a new user or claims it is encrypted. Guest results intentionally do not survive restart. Model reuse, the `redacted-model` volume, one Uvicorn worker, local-only binding and the approximately 1.7 GB application image remain intact.
-
-Public hosting is outside this change. It would need explicit allowed origins, HTTPS, proxy configuration, suitable quotas and operational data/key policies. Do not remove the local request checks merely to expose the service publicly.
-
-## Verified preparation release — 1 October 2026
-
-- Full backend suite: 99 passed, including native/fallback fidelity, isolated guests, owner-scoped opaque storage, expiry/reset/restart, download disconnects/Range errors and retrying failed cleanup.
-- TypeScript/Vite build and all four browser scripts pass, including a test-only injected provider lifecycle fixture. Those fixtures do not implement or validate Tide cryptography.
-- Live Docker smoke passes real local inference on DOCX Mask, PDF Mask, DOCX Label and PDF Replace; each verifies all three output formats, concealed review and cross-session denial. Test documents were deleted.
-- FastAPI directly serves both the upload page and `/secure-history` with no browser runtime errors. Production has no Node executable.
-- Runtime image: 1,698,528,775 bytes (about 1.7 GB). Existing `redacted-model` cache reused across rebuild/restart. Guest storage verified as tmpfs; restart removes working results. No durable history records were created.
-- Actual TideCloak/JWT/self-encryption tests remain pending Raziel integration.
-
-## Guest review update — 1 October 2026
-
-Guest filenames now remain in session RAM and appear under the looping redaction-bar loader. Guest detections have one panel-wide Reveal/Hide control; the same-session endpoint returns detected originals together. The individual-value endpoint remains available for compatibility. Hidden values are not preloaded into the UI, and pending requests are cancelled on hide/close/expiry/identity change. A user icon replaces the header text action; its actual authentication behavior still depends on the future Tide provider. Disabled REDACT hover preserves its text and rotates only the arrow.
-
-Validation: 123 backend tests pass, all four browser scripts pass, and real local-model DOCX/PDF checks across Mask/Label/Replace verify filename retention, per-value reveal, other-session denial, generated downloads and cleanup. No actual Tide authentication or encryption was added.
+`GET /history/{id}/correction` requires verified ownership and decrypt permission. `PUT /history/{id}/correction?detail_count=N&revision=N` additionally requires encrypt/write permission, an opaque binary body, and the current revision. Stale writes return 409. The optional `only_if_missing=true` path leaves an existing correction unchanged, protecting manual work from automation. New automatic document ingestion never updates an existing history ID. Read-only accounts can open Original/Redacted and see counts; mutation controls are hidden and the backend rejects writes independently. Clearing a document deletes its correction and count-only audit rows.

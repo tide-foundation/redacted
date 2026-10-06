@@ -25,6 +25,7 @@ class Detector:
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(service, 'ROOT', tmp_path)
+    monkeypatch.setenv('PRIVACY_DATA_DIR', str(tmp_path))
     monkeypatch.setattr(service, 'model', Detector())
     original = service.importlib.util.find_spec
     monkeypatch.setattr(service.importlib.util, 'find_spec', lambda name: True if name == 'opf' else original(name))

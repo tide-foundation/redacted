@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Eye, EyeOff, X } from 'lucide-react';
+import { Eye, EyeOff, Pencil, X } from 'lucide-react';
 import type { DetectionReview, RevealedDetection } from './types';
 import { categoryLabels } from './types';
+import { CorrectionEditor, type CorrectionAccess } from './CorrectionEditor';
 
 export type RevealValues = (signal: AbortSignal) => Promise<RevealedDetection[]>;
 
-export function ReviewPanel({ review, onClose, onReveal }: {
+export function ReviewPanel({ id, review, onClose, onReveal, correctionAccess }: {
+  id?: string;
   review: DetectionReview;
   onClose: () => void;
   onReveal?: RevealValues;
+  correctionAccess?: CorrectionAccess;
 }) {
+  const section = useRef<HTMLElement>(null);
+  const [editing,setEditing]=useState(false);
+  useEffect(() => {
+    section.current?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+  }, [editing]);
   const [values, setValues] = useState<RevealedDetection[] | null>(null);
   const [pending, setPending] = useState(false);
+  const [replacements, setReplacements] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const request = useRef<AbortController | null>(null);
   const clearValues = useCallback(() => {
@@ -19,7 +28,7 @@ export function ReviewPanel({ review, onClose, onReveal }: {
     setValues(null); setPending(false); setError('');
   }, []);
   useEffect(() => {
-    clearValues();
+    clearValues(); setReplacements({});
     const hide = () => { if (document.visibilityState === 'hidden') clearValues(); };
     document.addEventListener('visibilitychange', hide);
     window.addEventListener('pagehide', clearValues);
@@ -36,18 +45,23 @@ export function ReviewPanel({ review, onClose, onReveal }: {
     setPending(true); setError('');
     try {
       const originals = await onReveal(controller.signal);
-      if (!controller.signal.aborted && request.current === controller) setValues(originals);
+      if (!controller.signal.aborted && request.current === controller) {
+        setValues(originals);
+        setReplacements(Object.fromEntries(originals.flatMap(value => value.replacement === undefined ? [] : [[`${value.category}:${value.occurrence}`, value.replacement]])));
+      }
     } catch {
       if (!controller.signal.aborted && request.current === controller) setError('Could not reveal the values. Please try again.');
     } finally {
       if (request.current === controller) { request.current = null; setPending(false); }
     }
   }
-  const revealed = new Map(values?.map(value => [`${value.category}:${value.occurrence}`, value.original]));
+  const revealed = new Map(values?.map(value => [`${value.category}:${value.occurrence}`, value]));
   const active = values !== null || pending;
   const report = review.scan_report;
-  return <section className="review-panel" aria-label="Detection review">
+  if(editing && correctionAccess) return <CorrectionEditor access={correctionAccess} onBack={()=>setEditing(false)} onClose={onClose}/>;
+  return <section ref={section} id={id} className="review-panel" aria-label="Detection review">
     <div className="preview-header review-heading"><h2>Detections</h2><div className="review-actions">
+      {correctionAccess && <button className="text-button" onClick={()=>{clearValues();setEditing(true);}}><Pencil size={14} aria-hidden="true"/> Review and correct</button>}
       {review.detections.length > 0 && <button className="text-button reveal-button" disabled={!onReveal} aria-label={active ? 'Hide original values' : 'Reveal original values'} aria-pressed={values !== null} onClick={() => void toggle()}>
         {active ? <EyeOff size={14}/> : <Eye size={14}/>} {active ? 'Hide values' : 'Reveal values'}
       </button>}
@@ -55,11 +69,12 @@ export function ReviewPanel({ review, onClose, onReveal }: {
     </div></div>
     {review.detections.length ? <div className="detection-list">{review.detections.map(detection => {
       const key = `${detection.category}:${detection.occurrence}`;
-      const original = revealed.get(key);
+      const value = revealed.get(key);
+      const original = value?.original;
       return <div className="detection-row" key={key}>
         <span className="detection-category">{categoryLabels[detection.category] || detection.category} <small>#{detection.occurrence}</small></span>
         {original !== undefined ? <span className="revealed-value">{original}</span> : <span className="concealed-value" aria-label="Original value concealed" aria-busy={pending}>{pending && <span className="reveal-wait" aria-hidden="true"/>}</span>}
-        <span className="replacement-value">{detection.replacement}</span>
+        <span className="replacement-value">{detection.replacement ?? replacements[key] ?? (pending ? <span className="concealed-value" aria-label="Loading replacement" aria-busy="true"><span className="reveal-wait" aria-hidden="true"/></span> : <span title="This older file stores replacements with its originals. Reveal once to load them.">—</span>)}</span>
       </div>;
     })}</div> : <p className="review-note">No sensitive text detected.</p>}
     {error && <p className="review-note" role="alert">{error}</p>}

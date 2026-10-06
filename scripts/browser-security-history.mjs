@@ -25,6 +25,9 @@ await page.route('**/api/service/**', async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
   paths.push(path);
   let body;
+  if (path.endsWith('/tide/config')) return route.fulfill({ status: 503, json: { detail: 'Secure history is not configured.' } });
+  if (path.endsWith('/tide/setup/v2/session')) return route.fulfill({ json: { unlocked: false } });
+  if (path.endsWith('/tide/status')) return route.fulfill({ json: { state: 'stopped', configured: false, reachable: false, url: 'http://localhost:8080' } });
   if (path.endsWith('/health')) body = { model_installed: true, model_loaded: true, device: 'cpu' };
   // Even a capability response cannot manufacture a configured identity provider.
   else if (path.endsWith('/capabilities')) body = { secure_history: { available: true } };
@@ -74,11 +77,17 @@ async function openReview() {
 }
 try {
   await page.goto(`${base}/secure-history`);
-  await page.getByRole('heading', { name: 'Secure your history', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'Keep your files. Keep them private.', exact: true }).waitFor();
   await assertFooter();
-  assert.match(await page.locator('main').innerText(), /both free/);
+  assert.match(await page.locator('main').innerText(), /without an account/);
   assert.match(await page.locator('main').innerText(), /not configured/);
-  assert.equal(await page.getByRole('button', { name: 'Sign in to keep history', exact: true }).isDisabled(), true);
+  assert.equal(await page.locator('.setup-command').count(), 0);
+  await page.getByRole('button', { name: 'Set up TideCloak', exact: true }).click();
+  await page.getByRole('heading', { name: 'Set up TideCloak', exact: true }).waitFor();
+  assert.equal(new URL(page.url()).pathname, '/secure-history/setup');
+  await page.reload();
+  await page.getByRole('heading', { name: 'Set up TideCloak', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'About secure history', exact: false }).click();
   assert.equal(await page.locator('.topbar').getByText('Secure history', { exact: true }).count(), 0);
   await page.getByRole('button', { name: 'Back to redacting', exact: false }).click();
   await assertFooter();
@@ -174,7 +183,7 @@ try {
   for (const original of Object.values(originals)) await page.getByText(original, { exact: true }).waitFor();
   // Unconfigured Account action leads to information and clears open plaintext.
   await page.getByRole('button', { name: 'Account', exact: true }).click();
-  await page.getByRole('heading', { name: 'Secure your history', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'Keep your files. Keep them private.', exact: true }).waitFor();
   assert.equal(await page.getByRole('region', { name: 'Detection review' }).count(), 0);
   assert.equal(await page.getByText(originals.private_person, { exact: true }).count(), 0);
   await page.goBack();
@@ -183,7 +192,8 @@ try {
   await page.getByRole('button', { name: 'Preview', exact: true }).click();
   await previewRequested.promise;
   document = null; csrf = 'new-session';
-  await page.getByText('No current file.', { exact: true }).waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByText('No files yet.', { exact: true }).waitFor();
   delayedPreview.resolve();
   await page.waitForTimeout(100);
   assert.equal(await page.locator('dialog').isVisible(), false);
@@ -191,22 +201,25 @@ try {
 
   // A reveal completing after expiry is discarded along with the working file.
   document = makeDocument('33333333-3333-4333-8333-333333333333');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.getByRole('button', { name: 'Review detections', exact: true }).click();
   const expired = holdOriginals();
   await revealValues().click(); await expired.ready.promise;
   document = null; csrf = 'third-session';
-  await page.getByText('No current file.', { exact: true }).waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByText('No files yet.', { exact: true }).waitFor();
   expired.release.resolve(); heldOriginal = null;
   await page.waitForTimeout(100);
   assert.equal(await page.getByText(originals.private_person, { exact: true }).count(), 0);
   assert.equal(await page.getByRole('region', { name: 'Detection review' }).count(), 0);
 
   document = { ...makeDocument('44444444-4444-4444-8444-444444444444'), expires_at: new Date(Date.now() + 5000).toISOString() };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.getByRole('button', { name: 'Review detections', exact: true }).waitFor();
   await page.locator('input[type=file]').setInputFiles({ name: 'next.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-fixture') });
   await page.getByText('next.pdf', { exact: true }).waitFor();
   document = null;
-  await page.getByText('No current file.', { exact: true }).waitFor();
+  await page.getByText('No files yet.', { exact: true }).waitFor();
   assert.equal(await page.getByText('next.pdf', { exact: true }).count(), 0);
   assert.equal(await page.locator('input[type=file]').inputValue(), '');
   assert.equal(await page.getByRole('button', { name: 'REDACT', exact: true }).isDisabled(), true);

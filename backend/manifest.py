@@ -24,6 +24,7 @@ LIMITATIONS = (
     'The model can miss sensitive information or flag ordinary text. Review the output before sharing.',
     'Sensitivity is a detection setting, not a confidence or accuracy score.',
     'Layout preservation applies to the original file format; other download formats are rewritten.',
+    'Document properties are removed in every mode. Embedded image metadata is not scanned.',
 )
 
 
@@ -104,6 +105,7 @@ def build_manifest(result, edits: list[Edit], *, mode: str, sensitivity: int,
         cursor = span.end
     return {
         'schema_version': SCHEMA_VERSION,
+        'text': text,
         'mode': mode,
         'detections': detections,
         'scan_report': {
@@ -127,6 +129,15 @@ def concealed_review(manifest: dict) -> dict:
     The detached result cannot mutate the sensitive in-memory manifest.
     """
     report = manifest['scan_report']
+    if manifest.get('correction'):
+        counts = Counter()
+        detections = []
+        for d in manifest['correction']['details']:
+            counts[d['category']] += 1
+            detections.append({'category': d['category'], 'occurrence': counts[d['category']], 'replacement': d['replacement']})
+        return {'detections': detections, 'scan_report': {**deepcopy(report), 'counts': dict(counts),
+                'total_detections': len(detections), 'layout_preserved': False,
+                'warnings': ['Corrected downloads use a clean text layout.']}}
     return {
         'detections': [{
             'category': item['category'],

@@ -20,7 +20,7 @@ Copy `.env.example` to `.env` to retain `LOCAL_UID`, `LOCAL_GID` or `REDACTED_PO
 
 Compose publishes the app only on `127.0.0.1:3001` by default. One Uvicorn worker serves the UI and API on container port 8000. Node is used only during the frontend build; the runtime image has no Node server or model weights.
 
-Startup downloads missing assets into `redacted-model`, validates them and then enables Hugging Face offline mode. Valid caches are reused without checking the hub. The health check reports HTTP availability, not model accuracy or successful inference. The model loads lazily on the first document.
+The required Compose `model-init` service downloads missing assets into `redacted-model` and validates them before the app can start. App startup only checks existing assets and enables Hugging Face offline mode; it never downloads weights. Use `docker compose up --build --wait` to wait for setup and app health. Valid caches are reused without checking the hub. The health check reports HTTP availability, not model accuracy or successful inference. The model loads lazily on the first document.
 
 ### Reuse an existing model download
 
@@ -88,11 +88,13 @@ The real-model smoke script defaults to port 3001 and accepts `BASE_URL` and `SE
 | --- | --- | --- |
 | Guest sessions, filenames and full detection manifests | Python process memory | Temporary session |
 | Generated guest files | `/app/data/guest/<document-id>/` on tmpfs | Temporary session |
-| Prepared owner-scoped history database | Host `data/documents.sqlite3` | Persistent; history integration disabled |
+| Owner-scoped encrypted history database | Host `data/documents.sqlite3` | Persistent when TideCloak is configured |
 | Sensitivity calibration values | Host `data/.calibration/` | Persistent; no document content |
 | Model and tokenizer | Docker volume `redacted-model`, mounted at `/models/` | Persistent |
 
 Original uploads are held temporarily in memory and are not intentionally saved as source files. The selected browser file is also held only in memory, never in localStorage or IndexedDB. Full manifests include detected original values and exact edits; they remain in bounded temporary server memory. The review interface fetches original values only on **Reveal values** and clears them when hidden, closed or expired.
+
+Health polling runs every 60 seconds in a visible tab. Working-document polling runs every 2 seconds during processing and every 30 seconds while idle, pauses in hidden tabs, and refreshes on return/reconnect. Failed requests back off to 15/30/60 seconds.
 
 A guest has one current document. Its one-hour deadline starts when an upload is accepted; polling does not renew it. Browser tabs sharing the session cookie share the working document. Closing a browser is not a reliable cleanup signal because browsers may restore session cookies. Replacement, deletion, expiry and server startup clear guest work.
 
@@ -100,9 +102,11 @@ Docker limits the guest tmpfs to 512 MiB; this is a ceiling, not reserved memory
 
 Up to three jobs can be admitted, processed sequentially by one worker sharing one model. A guest cannot submit a second active job. Use one Uvicorn worker: extra workers would duplicate model memory and separate in-memory sessions and queues. Normal shutdown waits for admitted jobs and clears guest work; Compose allows ten minutes before forced termination. Expired or reset jobs cannot republish their results.
 
+The Docker build applies `scripts/patch-opf.py` to the pinned OPF dependency. CPU loading retains safetensors-backed parameter storage instead of copying every weight into anonymous memory. CPU expert operations use batches of four tokens instead of 32; the context window, selected experts and weight precision are unchanged. The patch fails closed if the expected upstream code changes. Direct Python installations can apply the same patch with `.venv/bin/python scripts/patch-opf.py`. Run `scripts/model-smoke.py` against the service to check real inference and exports after changing this patch.
+
 The local server and model see plaintext while processing. Generated files may retain missed sensitive text, private images or confidential body content. Concealment in the UI is not encryption. No external font service, analytics or document-processing API is used. Local Host and same-origin checks are enforced, and data/model directories are not served as static files. This release is intended for a trusted local machine, not a public or shared-network service.
 
-The prepared durable design stores source, manifest and cached outputs as separately protected, owner-scoped artifacts. **Authentication and encryption are not connected, so durable-history endpoints reject access.** There is no plaintext saving fallback. See the [storage decision](adr/001-secure-history-storage.md) and [current integration status](secure-history.md). The [architecture audit](architecture-audit.md) records an earlier baseline, not current operating instructions.
+The optional Tide integration stores filename, source, manifest and cached outputs as separately protected, owner-scoped artifacts. **Durable-history endpoints reject access until the owner completes Tide setup and the request passes authentication and proof verification.** There is no plaintext saving fallback. See the [storage decision](adr/001-secure-history-storage.md) and [current integration status](secure-history.md). The [architecture audit](architecture-audit.md) records an earlier baseline, not current operating instructions.
 
 ## Document fidelity and limits
 
@@ -112,6 +116,8 @@ The matching-format download attempts to preserve the source: DOCX for a Word up
 - **PDF:** physically removes detected glyphs with redactions, then inserts replacements at their locations. Page geometry and unaffected text/vector artwork remain. Replacement text approximates the original font family, style and color using standard fonts; exact embedded-font matching is not guaranteed. Text shrinks as needed to a 6 pt minimum. Unsupported rotated text, fit failures or other native-export failures fall back to a clean rewrite. Flatten interactive forms first. Metadata, annotations, attachments, scripts, links and bookmarks are removed; output is saved afresh with garbage collection rather than appended revisions.
 - **Images:** native exports preserve images, which are not scanned. The detailed scan report warns about them. PDF image pixels beneath detected text redactions are blanked, but other visual information and image metadata may remain. Image-only scans need separate local OCR first; this app performs no OCR.
 - **Limits:** 20 MiB per upload, 200,000 extracted characters and 250 source PDF pages. DOCX packages are limited to 100 MiB expanded and 10,000 entries. Legacy `.doc` needs conversion to `.docx`; encrypted PDFs are unsupported. Rebuilt PDFs are capped at 1,000 output pages.
+
+Document properties are stripped independently of model detection in every mode. Word core, extended and custom property parts are removed; PDF document Info (including custom keys) and XMP metadata are removed. The Original download remains unchanged. This does not scan or strip metadata inside preserved image payloads.
 
 A complete clean export is created before native-format editing. Native edits use a temporary file and replace the clean matching-format output only on success, preserving the fallback if layout editing fails. This applies to Mask, Label and Replace. Fixed masks hide original character counts in the replacement text, but preserved layouts can still reveal dimensions or spacing. Read the [full disclaimer](../DISCLAIMER.md).
 
