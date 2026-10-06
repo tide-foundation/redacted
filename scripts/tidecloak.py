@@ -114,7 +114,7 @@ def open_setup_browser(url):
     return False
 
 
-def handoff(origin, data_root, username, password, open_browser=True):
+def handoff(origin, data_root, username, password, open_browser=True, public_origin=None):
     # The permit is a random digest only. The admin password travels directly to
     # the local backend, lives in RAM for at most an hour, and never enters a URL.
     token = secrets.token_urlsafe(32)
@@ -124,6 +124,10 @@ def handoff(origin, data_root, username, password, open_browser=True):
         result = call(origin, 'tide/setup/v2/launch', {'permit': token, 'username': username, 'password': password})
     finally:
         path.unlink(missing_ok=True)
+    if public_origin:
+        from urllib.parse import urlsplit
+        link = urlsplit(result['url'])
+        result['url'] = public_origin + link.path + '#' + link.fragment
     print('\nContinue in Redacted. This private setup link works once and expires in one hour:\n' + result['url'])
     if open_browser and not open_setup_browser(result['url']):
         print('Could not open a browser automatically. Open a browser on this computer and paste the complete private setup link above, including #setup= and everything after it.')

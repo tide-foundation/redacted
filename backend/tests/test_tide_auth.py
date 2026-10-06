@@ -152,6 +152,6 @@ def test_rejected_owner_credentials_explain_recovery_without_echoing_secrets(mon
     with pytest.raises(tide_setup.HTTPException) as caught:
         tide_setup.configure_realm(body, BASE, tmp_path)
     assert caught.value.status_code == 403
-    assert 'scripts/tidecloak.py credentials' in caught.value.detail
+    assert 'bash scripts/tidecloak.sh credentials' in caught.value.detail
     assert 'not the setup code' in caught.value.detail
     assert 'private-password' not in caught.value.detail

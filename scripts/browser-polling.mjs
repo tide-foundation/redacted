@@ -6,6 +6,7 @@ import { setTimeout as settle } from 'node:timers/promises';
 const browser = await chromium.launch({headless:true});
 const page = await browser.newPage();
 let health = 0, current = 0, document = null, failHealth = false, holdHealth = false, releaseHealth;
+let failCurrent = false, csrf = 'fixture';
 const errors=[];
 page.on('pageerror',e=>errors.push(e.message));
 await page.route('**/api/service/**',async route=>{
@@ -16,7 +17,7 @@ await page.route('**/api/service/**',async route=>{
     if (holdHealth) await new Promise(resolve=>{releaseHealth=resolve;});
     return route.fulfill({status:failHealth?503:200,json:failHealth?{detail:'Unavailable'}:{model_installed:true,model_loaded:true,device:'cpu'}});
   }
-  if (path.endsWith('/guest/current')) {current++;return route.fulfill({json:{document,csrf_token:'fixture',expires_at:null}});}
+  if (path.endsWith('/guest/current')) {current++;return route.fulfill({status:failCurrent?503:200,json:failCurrent?{detail:'Unavailable'}:{document,csrf_token:csrf,expires_at:null}});}
   throw new Error('Unexpected polling fixture path: '+path);
 });
 const advance = async ms => {await page.clock.runFor(ms);await settle(100);};
@@ -63,6 +64,16 @@ try {
   await event('focus');await advance(120000);assert.equal(health,slow);
   holdHealth=false;releaseHealth();await settle(100);
   assert.equal(await page.getByText('Service unavailable.',{exact:true}).count(),0);
+  // A server restart loses temporary guest state. Recover with a new CSRF token
+  // and an actionable notice, rather than leaving an error or stale result.
+  failCurrent=true;await event('online');
+  await page.getByRole('button',{name:'Retry now',exact:true}).waitFor();
+  failCurrent=false;document=null;csrf='replacement-session';
+  await page.getByRole('button',{name:'Retry now',exact:true}).click();
+  await page.getByText('Your temporary session ended or the service restarted. Add your file again to continue.',{exact:true}).waitFor();
+  await page.getByText('No files yet.',{exact:true}).waitFor();
+  await page.locator('input[type=file]').setInputFiles({name:'Retry.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-fixture')});
+  assert.equal(await page.getByRole('button',{name:'REDACT',exact:true}).isEnabled(),true);
   assert.deepEqual(errors,[]);
   console.log('Polling passed: health 60s, idle job 30s, processing job 2s, hidden-tab pause, immediate return/online refresh, 15/30/60s error backoff and no overlapping health requests.');
 } finally {await browser.close();}

@@ -26,29 +26,34 @@ Matching-format downloads preserve the original layout where possible. If an in-
 
 **Upgrading an earlier installation?** Export anything you need first. This version removes the old global, unowned file history and its outputs at startup. Current guest results also disappear on restart. See [updates and storage](docs/development.md#updates-and-existing-installations).
 
-Install Git and Docker with Compose, then:
+Install Git and Docker with Compose 2.24 or newer, then (no host Python or Node installation required):
 
 ```bash
 git clone https://github.com/tide-foundation/redacted.git
 cd redacted
 mkdir -p data/guest
-docker compose up --build -d
+docker compose up --build --wait
 ```
 
-Open **http://localhost:3001**. The first startup downloads the model and tokenizer; follow progress with `docker compose logs -f app`. Later starts reuse the cached files. Setup needs internet access; document processing uses local assets.
+Open **http://localhost:3001**. Compose downloads and validates the model and tokenizer in the `model-init` setup service before starting the app. The command waits for the app to be healthy; follow download progress in another terminal with `docker compose logs -f model-init`. Later starts reuse the cached files. Setup needs internet access; document processing uses local assets.
 
-Use `docker compose stop` to stop the app. After updating your checkout, use `docker compose up --build -d` again; keep the `redacted-model` volume to avoid downloading the model again. Linux users whose UID/GID differs from 1000 should follow the [ownership settings](docs/development.md#docker-settings) before the first build.
+Use `docker compose stop` to stop the app. After updating your checkout, use `docker compose up --build --wait` again; keep the `redacted-model` volume to avoid downloading the model again. Linux users whose UID/GID differs from 1000 should follow the [ownership settings](docs/development.md#docker-settings) before the first build.
 
 ### Disk and memory
 
 | Component | Approximate size |
 | --- | --- |
+| Required image + model/tokenizer at initial setup | **4.5 GB** |
 | Current local Docker runtime image | 1.7 GB |
 | Cached model and tokenizer | 2.8 GB |
 | Additional disk | Checkout, build caches, older images and any downloaded results |
 | Runtime memory | Several GB for inference, plus document processing and other applications |
 
-These are observations of the current CPU build, not validated minimum requirements. The image and model alone total about 4.5 GB; allow additional disk for building. Memory use depends on the document. The model loads on the first submission and stays in RAM while the server runs.
+These are observations of the current CPU build, not validated minimum requirements. The image and model alone total about 4.5 GB; allow additional disk for building. Memory use depends on the document. The model loads on the first submission. The Docker CPU build retains file-backed weights so the OS can reclaim their pages under memory pressure, and uses small internal expert batches to limit temporary allocations.
+
+### Mac support
+
+The Docker setup is intended for both Intel and Apple Silicon Macs using [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/). The pinned TideCloak dev image publishes both `linux/amd64` and `linux/arm64`; Redacted builds for the host architecture. Use the same commands in Terminal. Processing uses CPU inside Docker, without Apple GPU acceleration. Allow several GB of Docker memory for the model plus 2 GB for optional TideCloak. Mac end-to-end operation has not yet been tested on hardware.
 
 ## Temporary by design
 
@@ -56,7 +61,7 @@ Guest mode keeps **one current document per browser session**. Uploading another
 
 Guest filenames and detected original values stay in temporary server memory. Generated guest files use temporary memory-backed storage in Docker. The local server can read document contents while processing; concealed values in the interface are not encryption. See [where data lives](docs/development.md#storage-and-privacy-boundaries).
 
-**Optional encrypted history:** the TideCloak integration is ready for owner setup and live-account testing. It runs as a separate, optional local Docker service and uses Tide’s network for authentication and encryption. Run `python3 scripts/tidecloak.py start` once after the app is running. It opens an authorized setup wizard inside Redacted; no setup-code entry or routine admin-console visits. The [setup guide](docs/tidecloak-setup.md) also covers using an existing local TideCloak server. Guest mode works without it. Live sign-in, account linking and unattended self-registration must be verified on your installation before relying on saved history.
+**Optional encrypted history:** the TideCloak integration is ready for owner setup and live-account testing. It runs as a separate, optional local Docker service and uses Tide’s network for authentication and encryption. Run `bash scripts/tidecloak.sh start` once after the app is running. It opens an authorized setup wizard inside Redacted; no setup-code entry or routine admin-console visits. The [setup guide](docs/tidecloak-setup.md) also covers using an existing local TideCloak server. Guest mode works without it. Live sign-in, account linking and unattended self-registration must be verified on your installation before relying on saved history.
 
 ## Join in
 

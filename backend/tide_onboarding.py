@@ -1,9 +1,10 @@
-"""Embedded, owner-authorized Tide setup. Secrets are short-lived and memory-only.
+"""Embedded, owner-authorized Tide setup with browser-bound resumable authority.
 
 The terminal hands authority to this process once. Public guest endpoints never
 receive bootstrap credentials or arbitrary access to the Tide admin API.
 """
 from contextlib import contextmanager
+import base64
 import hashlib
 import hmac
 import json
@@ -18,6 +19,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from cryptography.fernet import Fernet, InvalidToken
 
 from backend import tide_config, tide_setup
 from backend.tide_signup import configure_signup
@@ -28,6 +30,49 @@ _work = Lock()
 _authority = None
 _COOKIE = 'redacted_owner_setup'
 TTL = 3600
+RESUME_TTL = 7 * 24 * 3600
+
+
+def resume_path():
+    return tide_config.directory() / 'owner-resume.enc'
+
+
+def resume_cipher(token):
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(
+        ('redacted-owner-resume:' + token).encode()).digest()))
+
+
+def save_authority(a, token, request):
+    payload = {**a, 'password': a['password'].get_secret_value(),
+               'origin': tide_config.local_origin(str(request.base_url).rstrip('/')),
+               'tide_url': tide_setup.public_url()}
+    path = resume_path()
+    temporary = path.with_suffix('.tmp')
+    with open(temporary, 'wb', opener=lambda p, flags: os.open(p, flags, 0o600)) as out:
+        out.write(resume_cipher(token).encrypt(json.dumps(payload).encode()))
+        out.flush()
+        os.fsync(out.fileno())
+    temporary.replace(path)
+
+
+def restore_authority(token, request):
+    if not token:
+        return None
+    try:
+        a = json.loads(resume_cipher(token).decrypt(resume_path().read_bytes()))
+        if a['expires'] <= time.time():
+            resume_path().unlink(missing_ok=True)
+            return None
+        if (a['origin'] != tide_config.local_origin(str(request.base_url).rstrip('/'))
+                or a['tide_url'] != tide_setup.public_url()):
+            return None
+        a['password'] = SecretStr(a['password'])
+        timer = Timer(a['expires'] - time.time(), expire, args=(a['id'],))
+        timer.daemon = True
+        timer.start()
+        return a
+    except (OSError, InvalidToken, ValueError, KeyError, TypeError):
+        return None
 
 
 def read_progress():
@@ -58,20 +103,26 @@ def expire(identifier):
     with _guard:
         if _authority and _authority['id'] == identifier:
             _authority = None
+            resume_path().unlink(missing_ok=True)
 
 
 def active():
     global _authority
     if _authority and _authority['expires'] <= time.time():
         _authority = None
+        resume_path().unlink(missing_ok=True)
     return _authority
 
 
 def owner(request: Request):
+    global _authority
     closed()
     with _guard:
         a = active()
-        cookie = hashlib.sha256(request.cookies.get(_COOKIE, '').encode()).hexdigest()
+        token = request.cookies.get(_COOKIE, '')
+        if not a:
+            _authority = a = restore_authority(token, request)
+        cookie = hashlib.sha256(token.encode()).hexdigest()
         if not a or not a.get('cookie') or not hmac.compare_digest(cookie, a['cookie']):
             raise HTTPException(401, 'Reopen setup from the terminal to resume. Your progress is saved.')
         if request.method != 'GET' and not hmac.compare_digest(request.headers.get('X-Setup-CSRF', ''), a['csrf']):
@@ -106,10 +157,16 @@ def launch(body: Launch, request: Request):
             raise HTTPException(409, 'Setup is working. Wait before reopening it.')
         secret = secrets.token_urlsafe(32)
         identifier = secrets.token_hex(16)
+        resume_path().unlink(missing_ok=True)
         _authority = {'id': identifier, 'expires': time.time() + TTL,
                       'link': hashlib.sha256(secret.encode()).hexdigest(), 'cookie': None,
                       'csrf': secrets.token_urlsafe(32), 'username': body.username, 'password': body.password}
-    timer = Timer(TTL, expire, args=(identifier,)); timer.daemon = True; timer.start()
+    # An exchanged link extends this authority. The original link timer must
+    # not revoke the longer browser session.
+    def expire_link():
+        with _guard:
+            active()
+    timer = Timer(TTL, expire_link); timer.daemon = True; timer.start()
     origin = tide_config.local_origin(str(request.base_url).rstrip('/'))
     return {'url': origin + '/secure-history/setup#setup=' + secret}
 
@@ -129,9 +186,12 @@ def exchange(body: Exchange, request: Request, response: Response):
         token = secrets.token_urlsafe(32)
         a['link'] = None
         a['cookie'] = hashlib.sha256(token.encode()).hexdigest()
+        a['expires'] = time.time() + RESUME_TTL
+        save_authority(a, token, request)
         csrf = a['csrf']
+    timer = Timer(RESUME_TTL, expire, args=(a['id'],)); timer.daemon = True; timer.start()
     response.set_cookie(_COOKIE, token, httponly=True, samesite='strict',
-                        secure=request.url.scheme == 'https', path='/api/service/tide/setup/v2', max_age=TTL)
+                        secure=request.url.scheme == 'https', path='/api/service/tide/setup/v2', max_age=RESUME_TTL)
     return {'csrf': csrf}
 
 
@@ -150,7 +210,7 @@ def session(request: Request):
     try:
         a = owner(request)
     except HTTPException:
-        return {'unlocked': False, 'configured': False}
+        return {'unlocked': False, 'configured': False, 'saved': read_progress() is not None}
     return {'unlocked': True, 'csrf': a['csrf'], 'busy': _work.locked(), 'progress': public_progress()}
 
 
@@ -292,6 +352,24 @@ def realm_template(state):
             {'alias': 'VERIFY_PROFILE', 'providerId': 'VERIFY_PROFILE', 'enabled': False}]}
 
 
+def select_setup_realm(c, state):
+    """Reuse only our own interrupted setup; leave unrelated realms untouched."""
+    saved = SetupAdmin(c, state['realm'])
+    existing = saved.call('GET', '')
+    if existing and (existing.get('attributes') or {}).get('redacted.setup.id') == state['id']:
+        return saved, existing
+    base = state.setdefault('realm_base', state['realm'])
+    for index in range(1, 101):
+        name = base if index == 1 else f'{base[:74]}-{index}'
+        admin = SetupAdmin(c, name)
+        existing = admin.call('GET', '')
+        if not existing or (existing.get('attributes') or {}).get('redacted.setup.id') == state['id']:
+            state['realm'] = name
+            save_progress(state)
+            return admin, existing
+    raise HTTPException(409, 'Could not find an available Redacted installation name. Contact the person managing TideCloak.')
+
+
 def assert_realm(a, state):
     realm = a.call('GET', '')
     if not realm or (realm.get('attributes') or {}).get('redacted.setup.id') != state['id']:
@@ -321,11 +399,7 @@ def run_setup(authority):
                 a = SetupAdmin(c, state['realm'])
                 stage = state['stage']
                 if stage == 'realm':
-                    existing = a.call('GET', '')
-                    if existing and (existing.get('attributes') or {}).get('redacted.setup.id') != state['id']:
-                        state['stage'] = 'details'
-                        state['completed'] = []
-                        raise HTTPException(409, 'That realm name is already in use. Choose a different name; the existing realm has not been changed.')
+                    a, existing = select_setup_realm(c, state)
                     if not existing:
                         checked(c, 'POST', '/admin/realms', json=realm_template(state))
                     assert_realm(a, state)
@@ -361,10 +435,6 @@ def run_setup(authority):
                             install=False, setup_callback=True, owner_auth=OwnerAuth(authority))
                         clients = a.call('GET', '/clients', params={'clientId': 'redacted'})
                         client = clients[0]
-                        callback = state['app_origin'] + '/secure-history/setup'
-                        if callback not in client['redirectUris']:
-                            a.call('PUT', '/clients/' + client['id'], json={**client, 'redirectUris': client['redirectUris'] + [callback]})
-                            a.wait_for_approvals()
                         idp = a.call('GET', '/identity-provider/instances/tide')
                         desired = {**idp, 'config': {**idp.get('config', {}), 'CustomAdminUIDomain': state['app_origin']}}
                         if desired != idp:
@@ -453,7 +523,7 @@ def begin(a, *, acquired=False):
 @router.post('/begin')
 def start(body: Details, request: Request, a=Depends(owner)):
     if body.realm == 'master' or not body.accept_terms:
-        raise HTTPException(400, 'Choose a dedicated realm and accept Tide’s terms before continuing.')
+        raise HTTPException(400, 'Accept Tide’s terms before continuing; the administrator namespace is reserved.')
     origin = tide_config.local_origin(str(request.base_url).rstrip('/'))
     state = {'id': secrets.token_hex(16), 'realm': body.realm, 'email': body.email,
              'allow_registration': body.allow_registration, 'terms_accepted_at': int(time.time()),
@@ -539,9 +609,14 @@ def link_account(request: Request, a=Depends(owner)):
         admin = tide_setup.Admin(c, state['realm'])
         assert_realm(admin, state)
         client = admin.call('GET', '/clients', params={'clientId': 'redacted'})[0]
+        callback = state['app_origin'] + '/secure-history/linked'
+        if callback not in client.get('redirectUris', []):
+            setup_admin = SetupAdmin(c, state['realm'])
+            setup_admin.call('PUT', '/clients/' + client['id'], json={**client, 'redirectUris': client.get('redirectUris', []) + [callback]})
+            setup_admin.wait_for_approvals()
         value = checked(c, 'POST', admin.prefix + '/tideAdminResources/get-required-action-link',
             params={'userId': state['admin_id'], 'client_id': client['clientId'],
-                    'redirect_uri': state['app_origin'] + '/secure-history/setup', 'lifespan': 1800},
+                    'redirect_uri': callback, 'lifespan': 1800},
             json=['link-tide-account-action'])
         url = value.strip() if isinstance(value, str) else value.get('link') or value.get('url')
         if not isinstance(url, str) or not url.startswith(tide_setup.public_url() + '/'):

@@ -1,5 +1,6 @@
 import { TideCloak } from '@tidecloak/js';
 import type { SecureHistoryProvider, IdentityState, TransientHistoryInput } from './history';
+import { clearSetupSignIn, markSetupSignInAttempt } from './setupNavigation';
 import { fixedReplacement } from './types';
 import type { DetectionReview, DocumentResult, OutputFormat, RevealedDetection } from './types';
 
@@ -11,7 +12,7 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 const formats: OutputFormat[] = ['pdf', 'docx', 'txt'];
 const prefix = encoder.encode('REDACTED-TIDE-1\n');
 
-export function createTideHistoryProvider(config: TideConfig): SecureHistoryProvider & { initialise(): Promise<void> } {
+export function createTideHistoryProvider(config: TideConfig): SecureHistoryProvider & { initialise(options?: { completeSetup?: boolean }): Promise<void> } {
   const a = config.adapter;
   if (config.app_origin !== window.location.origin) throw new Error('Open Redacted at its configured origin.');
   const tc = new TideCloak({ url: a['auth-server-url'], realm: a.realm, clientId: a.resource,
@@ -152,12 +153,23 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
   return {
     getSnapshot: () => state,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
-    async initialise() {
+    async initialise({ completeSetup = false }: { completeSetup?: boolean } = {}) {
       try {
-        const authenticated = await tc.init({ onLoad: 'check-sso', pkceMethod: 'S256',
-          silentCheckSsoRedirectUri: config.app_origin + '/silent-check-sso.html', silentCheckSsoFallback: false,
-          checkLoginIframe: false, setupRequestEnclave: true, useDPoP: { mode: 'strict', alg: 'ES256' } });
-        if (authenticated) await identify(); else emit({ status: 'signed-out' });
+        const authenticated = await tc.init({
+          ...(completeSetup ? { redirectUri: config.app_origin + '/secure-history/setup' } : {
+            onLoad: 'check-sso' as const,
+            silentCheckSsoRedirectUri: config.app_origin + '/silent-check-sso.html', silentCheckSsoFallback: false,
+          }),
+          pkceMethod: 'S256', checkLoginIframe: false, setupRequestEnclave: true,
+          useDPoP: { mode: 'strict', alg: 'ES256' } });
+        if (authenticated) {
+          await identify();
+          if (completeSetup) clearSetupSignIn();
+        } else if (completeSetup && markSetupSignInAttempt()) {
+          // A new code+PKCE exchange in this tab binds its own DPoP key. Reuse
+          // the IdP session if available; never copy tokens from the link popup.
+          await tc.login({ prompt: 'none', redirectUri: config.app_origin + '/secure-history/setup' });
+        } else emit({ status: 'signed-out' });
       } catch { tc.clearToken(); emit({ status: 'error' }); }
     },
     async signIn() {
@@ -165,6 +177,7 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
       // a fresh working session; make that consequence explicit before redirect.
       const response = await fetch('/api/service/guest/current', { cache: 'no-store' });
       if (response.ok && (await response.json()).document && !window.confirm('Signing in starts a fresh working session. Download your current result first, then upload again after signing in. Continue?')) return;
+      clearSetupSignIn();
       await tc.login({ redirectUri: config.app_origin + '/' });
     },
     async signOut() {

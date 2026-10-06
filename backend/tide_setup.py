@@ -138,7 +138,7 @@ def configure_realm(body, app_origin, frontend_dir, *, admin_factory=Admin, inst
                 'password': body.password.get_secret_value(),
             })
             if token.status_code != 200:
-                raise HTTPException(403, 'TideCloak rejected the local owner username or password. Run python3 scripts/tidecloak.py credentials in your Redacted project folder and copy those credentials. Use the owner password, not the setup code or your Tide account password.')
+                raise HTTPException(403, 'TideCloak rejected the local owner username or password. Run bash scripts/tidecloak.sh credentials in your Redacted project folder and copy those credentials. Use the owner password, not the setup code or your Tide account password.')
             client.headers['Authorization'] = 'Bearer ' + token.json()['access_token']
         a = admin_factory(client, body.realm)
         realm = a.call('GET', '')
@@ -177,7 +177,7 @@ def configure_realm(body, app_origin, frontend_dir, *, admin_factory=Admin, inst
             'enabled': True, 'publicClient': True, 'standardFlowEnabled': True,
             'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': False,
             'redirectUris': [app_origin + '/', app_origin + '/silent-check-sso.html'] +
-                           ([app_origin + '/secure-history/setup'] if setup_callback else []),
+                           ([app_origin + '/secure-history/setup', app_origin + '/secure-history/linked'] if setup_callback else []),
             'webOrigins': [app_origin], 'rootUrl': app_origin, 'baseUrl': app_origin + '/',
             'fullScopeAllowed': False,
             'attributes': {'pkce.code.challenge.method': 'S256', 'dpop.bound.access.tokens': 'true',

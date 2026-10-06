@@ -311,3 +311,28 @@ dialog pre { font: 13px/1.8 Inter, sans-serif; white-space: pre-wrap; overflow-w
 .setup-loading { display: flex; align-items: center; gap: .8rem; padding: 2rem 0; }
 @keyframes setup-redaction { from { background-position: 100% 0; } to { background-position: 0 0; } }
 @media (prefers-reduced-motion: reduce) { .setup-step-loader { animation: none; } }
+
+.setup-layout { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 2rem; align-items: start; }
+.setup-layout > .setup-checklist { grid-column: 2; grid-row: 1; margin: 0; border-left: 1px solid #ccc; padding-left: 1.25rem; position: sticky; top: 1.5rem; }
+.setup-active-panel { grid-column: 1; grid-row: 1; min-width: 0; scroll-margin: 1.5rem; }
+.setup-active-panel .setup-current { border: 0; padding-top: 0; }
+.setup-active-panel .setup-form { margin-top: 0; }
+.setup-email-label { display: flex; align-items: center; gap: .5rem; }
+.setup-help { position: relative; }
+.setup-help button { border: 1px solid #777; border-radius: 50%; width: 1.3rem; height: 1.3rem; background: transparent; cursor: help; font-size: .8rem; }
+.setup-help [role=tooltip] { display: none; position: absolute; z-index: 2; top: 1.7rem; left: -12rem; width: min(18rem, 70vw); padding: .8rem; background: #111; color: #fff; font-size: .8rem; line-height: 1.5; }
+.setup-help:hover [role=tooltip], .setup-help:focus-within [role=tooltip] { display: block; }
+.setup-form .setup-check a { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 760px) {
+  .setup-layout { display: flex; flex-direction: column; }
+  .setup-active-panel { order: 0; width: 100%; }
+  .setup-layout > .setup-checklist { order: 1; position: static; border-left: 0; border-top: 1px solid #ccc; padding: 1.25rem 0 0; width: 100%; }
+}
+
+.setup-step-title { white-space: nowrap; }
+.setup-status-label { display: flex; align-items: center; gap: .6rem; font-size: .8rem; }
+.setup-progress-message, .setup-action-message { margin: 1rem 0; padding: 1rem; }
+.setup-progress-message { background: #f3f3f1; color: #555; }
+.setup-action-message { border-left: 3px solid #111; background: #fafaf9; }
+.setup-progress-message p, .setup-action-message p { margin: .6rem 0 0; }
+@media (prefers-reduced-motion: reduce) { .setup-progress-message .spin { animation: none; } }

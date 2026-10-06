@@ -15,7 +15,10 @@
 !backend/requirements*.txt
 !scripts/
 !scripts/download-model.py
+!scripts/patch-opf.py
 !scripts/start-server.sh
+!scripts/tidecloak.py
+!scripts/tidecloak-container.py
 !LICENSE
 !THIRD_PARTY_NOTICES.md
 !licenses/

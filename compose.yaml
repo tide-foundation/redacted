@@ -1,5 +1,16 @@
 name: redacted
 services:
+  model-init:
+    image: redacted:local
+    build:
+      context: .
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    entrypoint: ["python", "/app/scripts/download-model.py"]
+    volumes:
+      - model:/models
+    restart: "no"
   app:
     image: redacted:local
     build:
@@ -8,9 +19,13 @@ services:
         APP_UID: ${LOCAL_UID:-1000}
         APP_GID: ${LOCAL_GID:-1000}
     environment:
+      REDACTED_PUBLIC_URL: http://localhost:${REDACTED_PORT:-3001}
       TIDECLOAK_INTERNAL_URL: ${TIDECLOAK_INTERNAL_URL:-http://tidecloak:8080}
       TIDECLOAK_PUBLIC_URL: http://localhost:${TIDECLOAK_PORT:-8080}
     init: true
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     ports:
       - "127.0.0.1:${REDACTED_PORT:-3001}:8000"
@@ -29,6 +44,7 @@ services:
     # Allow an in-flight job to finish during an intentional shutdown.
     stop_grace_period: 10m
   tidecloak-volume-init:
+    # One-shot filesystem preparation, not a second TideCloak server.
     image: tideorg/tidecloak-dev@sha256:06ad6dfc58a441c40cda99ce6800511846a27b6cfb47d9c084274470e10548db
     profiles: [secure-history]
     user: "0:0"

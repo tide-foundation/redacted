@@ -4,10 +4,14 @@ import App from './App';
 import { unavailableHistoryProvider } from './history';
 import type { SecureHistoryProvider } from './history';
 import './globals.css';
+import { routeLinkReturn, setupSignInState } from './setupNavigation';
+
+routeLinkReturn();
 
 function Root() {
   const [provider, setProvider] = useState<SecureHistoryProvider>(unavailableHistoryProvider);
   useEffect(() => {
+    if (window.location.pathname === '/secure-history/linked') return;
     let live = true;
     void fetch('/api/service/capabilities', { cache: 'no-store' }).then(async capabilities => {
       if (!capabilities.ok || !(await capabilities.json()).secure_history.available) return;
@@ -18,7 +22,7 @@ function Root() {
       if (!live) return;
       const next = createTideHistoryProvider(config);
       setProvider(next);
-      void next.initialise();
+      void next.initialise({ completeSetup: window.location.pathname === '/secure-history/setup' && !!setupSignInState() });
     }).catch(() => {});
     return () => { live = false; };
   }, []);

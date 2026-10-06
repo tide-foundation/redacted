@@ -39,6 +39,7 @@ def unlock(c):
     r = c.post('/api/service/tide/setup/v2/exchange', json={'token': url.split('#setup=')[1]})
     assert r.status_code == 200
     assert 'HttpOnly' in r.headers['set-cookie'] and 'SameSite=strict' in r.headers['set-cookie']
+    assert f'Max-Age={setup.RESUME_TTL}' in r.headers['set-cookie']
     return {'X-Setup-CSRF': r.json()['csrf']}, url.split('#setup=')[1]
 
 
@@ -68,19 +69,81 @@ def test_csrf_origin_and_expired_authority_are_rejected(client):
     assert setup.read_progress()['realm'] == 'redacted-new'
 
 
-def test_restart_resume_keeps_progress_without_retaining_credentials(client, monkeypatch):
+def test_restart_and_reopened_browser_resume_without_terminal(client, monkeypatch):
     c = client; headers, _ = unlock(c)
     body = {'realm': 'redacted-new', 'email': 'owner@example.test', 'accept_terms': True}
     c.post('/api/service/tide/setup/v2/begin', json=body, headers=headers).raise_for_status()
     state = setup.read_progress(); state['stage'] = 'configure'; state['completed'] += ['realm', 'license']; setup.save_progress(state)
     monkeypatch.setattr(setup, '_authority', None)
-    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
-    unlock(c)
+    # A new browser session retains persistent cookies but no in-memory state.
+    cookies = dict(c.cookies)
+    c.cookies.clear()
+    c.cookies.update(cookies)
     resumed = c.get('/api/service/tide/setup/v2/session').json()
+    assert resumed['unlocked']
     assert resumed['progress']['stage'] == 'configure'
     assert 'password' not in json.dumps(resumed)
     assert 'private-master-password' not in (tide_config.directory() / 'onboarding.json').read_text()
+    sealed = setup.resume_path().read_bytes()
+    assert b'private-master-password' not in sealed
+    assert cookies[setup._COOKIE].encode() not in sealed
+    assert setup.resume_path().stat().st_mode & 0o777 == 0o600
     assert c.post('/api/service/tide/setup/v2/begin', json=body, headers={'X-Setup-CSRF': resumed['csrf']}).status_code == 409
+
+
+def test_resume_requires_original_cookie_and_rejects_tampering(client, monkeypatch):
+    c = client
+    unlock(c)
+    original = dict(c.cookies)
+    monkeypatch.setattr(setup, '_authority', None)
+    c.cookies.clear()
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+    c.cookies.set(setup._COOKIE, 'wrong-cookie')
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+    assert setup.resume_path().exists()
+    c.cookies.clear(); c.cookies.update(original)
+    sealed = setup.resume_path().read_bytes()
+    setup.resume_path().write_bytes(sealed[:-10] + b'tampered!!')
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+    setup.resume_path().write_bytes(sealed)
+    assert c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+    setup.expire(setup._authority['id'])
+    assert not setup.resume_path().exists()
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+
+
+def test_resume_expires_even_after_server_restart(client, monkeypatch):
+    c = client
+    unlock(c)
+    cookie = c.cookies[setup._COOKIE]
+    monkeypatch.setattr(setup, '_authority', None)
+    now = time.time()
+    monkeypatch.setattr(setup.time, 'time', lambda: now + setup.RESUME_TTL + 1)
+    # Send the expired cookie explicitly: a normal browser already drops it.
+    assert not c.get('/api/service/tide/setup/v2/session', headers={
+        'Cookie': f'{setup._COOKIE}={cookie}'}).json()['unlocked']
+    assert not setup.resume_path().exists()
+
+
+def test_new_terminal_handoff_revokes_previous_resume_cookie(client, monkeypatch):
+    c = client
+    unlock(c)
+    old = dict(c.cookies)
+    unlock(c)
+    new = dict(c.cookies)
+    monkeypatch.setattr(setup, '_authority', None)
+    c.cookies.clear(); c.cookies.update(old)
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+    c.cookies.clear(); c.cookies.update(new)
+    assert c.get('/api/service/tide/setup/v2/session').json()['unlocked']
+
+
+def test_resume_is_bound_to_original_tide_server(client, monkeypatch):
+    c = client
+    unlock(c)
+    monkeypatch.setattr(setup, '_authority', None)
+    monkeypatch.setenv('TIDECLOAK_PUBLIC_URL', 'http://localhost:9999')
+    assert not c.get('/api/service/tide/setup/v2/session').json()['unlocked']
 
 
 def test_master_and_unaccepted_terms_cannot_start(client):
@@ -353,20 +416,27 @@ def test_resume_rejects_another_app_origin_before_contacting_tide(client):
     assert not setup._work.locked()
 
 
-def test_account_link_uses_shipped_server_query_names_and_plain_text_response(client, monkeypatch):
+@pytest.mark.parametrize('registered', [False, True])
+def test_account_link_uses_shipped_server_query_names_and_plain_text_response(client, monkeypatch, registered):
     c = client; headers, _ = unlock(c)
     setup.save_progress({'id': 'job', 'realm': 'new-test', 'stage': 'link', 'completed': [], 'admin_id': 'user',
         'app_origin': BASE, 'tide_url': 'http://localhost:8080'})
+    approvals = []
+    monkeypatch.setattr(setup.SetupAdmin, 'wait_for_approvals', lambda self: approvals.append(True))
     def handle(request):
         if request.url.path.endswith('/token'):
             return httpx.Response(200, json={'access_token': 'fixture'})
         if request.url.path == '/admin/realms/new-test':
             return httpx.Response(200, json={'attributes': {'redacted.setup.id': 'job'}})
         if request.url.path.endswith('/clients'):
-            return httpx.Response(200, json=[{'clientId': 'redacted'}])
+            return httpx.Response(200, json=[{'id': 'client-id', 'clientId': 'redacted', 'redirectUris': [BASE + '/secure-history/setup'] + ([BASE + '/secure-history/linked'] if registered else [])}])
+        if request.method == 'PUT' and request.url.path.endswith('/clients/client-id'):
+            assert json.loads(request.content)['redirectUris'] == [BASE + '/secure-history/setup', BASE + '/secure-history/linked']
+            return httpx.Response(204)
+        assert approvals == ([] if registered else [True])
         assert request.url.path.endswith('/get-required-action-link')
         assert request.url.params['client_id'] == 'redacted'
-        assert request.url.params['redirect_uri'] == BASE + '/secure-history/setup'
+        assert request.url.params['redirect_uri'] == BASE + '/secure-history/linked'
         assert 'clientId' not in request.url.params and 'redirectUri' not in request.url.params
         assert json.loads(request.content) == ['link-tide-account-action']
         return httpx.Response(200, text='http://localhost:8080/realms/new-test/login-actions/action-token?key=fixture\n')
@@ -395,3 +465,33 @@ def test_link_checks_apply_pending_first_admin_attributes_before_reading_user(cl
     assert result.json() == {'waiting': True}
     assert calls.index('/admin/realms/new-test/iga/change-requests') < calls.index('/admin/realms/new-test/users/user')
     assert not setup._work.locked()
+
+
+@pytest.mark.parametrize('occupied', [False, True])
+def test_default_realm_selection_preserves_existing_installations(tmp_path, monkeypatch, occupied):
+    monkeypatch.setenv('PRIVACY_DATA_DIR', str(tmp_path))
+    requests = []
+    def handle(request):
+        requests.append((request.method, request.url.path))
+        if occupied and request.url.path == '/admin/realms/redacted':
+            return httpx.Response(200, json={'attributes': {'redacted.setup.id': 'another-installation'}})
+        return httpx.Response(404)
+    state = {'id': 'our-job', 'realm': 'redacted'}
+    with httpx.Client(base_url='http://local', transport=httpx.MockTransport(handle)) as c:
+        admin, existing = setup.select_setup_realm(c, state)
+    assert state['realm'] == ('redacted-2' if occupied else 'redacted')
+    assert setup.read_progress()['realm'] == state['realm']
+    assert not existing
+    assert all(method == 'GET' for method, _ in requests)
+
+
+def test_realm_selection_resumes_only_its_own_saved_name(tmp_path, monkeypatch):
+    monkeypatch.setenv('PRIVACY_DATA_DIR', str(tmp_path))
+    state = {'id': 'our-job', 'realm': 'redacted-2', 'realm_base': 'redacted'}
+    def handle(request):
+        owner = 'our-job' if request.url.path.endswith('redacted-2') else 'unrelated'
+        return httpx.Response(200, json={'attributes': {'redacted.setup.id': owner}})
+    with httpx.Client(base_url='http://local', transport=httpx.MockTransport(handle)) as c:
+        _, existing = setup.select_setup_realm(c, state)
+    assert state['realm'] == 'redacted-2'
+    assert existing['attributes']['redacted.setup.id'] == 'our-job'

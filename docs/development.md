@@ -20,7 +20,7 @@ Copy `.env.example` to `.env` to retain `LOCAL_UID`, `LOCAL_GID` or `REDACTED_PO
 
 Compose publishes the app only on `127.0.0.1:3001` by default. One Uvicorn worker serves the UI and API on container port 8000. Node is used only during the frontend build; the runtime image has no Node server or model weights.
 
-Startup downloads missing assets into `redacted-model`, validates them and then enables Hugging Face offline mode. Valid caches are reused without checking the hub. The health check reports HTTP availability, not model accuracy or successful inference. The model loads lazily on the first document.
+The required Compose `model-init` service downloads missing assets into `redacted-model` and validates them before the app can start. App startup only checks existing assets and enables Hugging Face offline mode; it never downloads weights. Use `docker compose up --build --wait` to wait for setup and app health. Valid caches are reused without checking the hub. The health check reports HTTP availability, not model accuracy or successful inference. The model loads lazily on the first document.
 
 ### Reuse an existing model download
 
@@ -101,6 +101,8 @@ A guest has one current document. Its one-hour deadline starts when an upload is
 Docker limits the guest tmpfs to 512 MiB; this is a ceiling, not reserved memory. The application limits retained results to 128 MiB per document and 256 MiB in total, with at most 64 guest sessions. Rendering can temporarily exceed retained-result limits before publication. Direct Python uses ordinary `data/guest/` filesystem storage with the same cleanup lifecycle; use an appropriately protected temporary filesystem if needed. Memory-backed storage can be swapped by the host, and cleanup is not a forensic-erasure guarantee.
 
 Up to three jobs can be admitted, processed sequentially by one worker sharing one model. A guest cannot submit a second active job. Use one Uvicorn worker: extra workers would duplicate model memory and separate in-memory sessions and queues. Normal shutdown waits for admitted jobs and clears guest work; Compose allows ten minutes before forced termination. Expired or reset jobs cannot republish their results.
+
+The Docker build applies `scripts/patch-opf.py` to the pinned OPF dependency. CPU loading retains safetensors-backed parameter storage instead of copying every weight into anonymous memory. CPU expert operations use batches of four tokens instead of 32; the context window, selected experts and weight precision are unchanged. The patch fails closed if the expected upstream code changes. Direct Python installations can apply the same patch with `.venv/bin/python scripts/patch-opf.py`. Run `scripts/model-smoke.py` against the service to check real inference and exports after changing this patch.
 
 The local server and model see plaintext while processing. Generated files may retain missed sensitive text, private images or confidential body content. Concealment in the UI is not encryption. No external font service, analytics or document-processing API is used. Local Host and same-origin checks are enforced, and data/model directories are not served as static files. This release is intended for a trusted local machine, not a public or shared-network service.
 

@@ -363,7 +363,7 @@ def create_app(frontend_dir: Path = FRONTEND_ROOT):
         elif ((origin and origin not in {server_origin, dev_origin})
               or request.headers.get('sec-fetch-site') == 'cross-site') and not (
                   request.method in {'GET', 'HEAD'} and (request.url.path.startswith('/tide_dpop/iss/')
-                  or (request.url.path in {'/', '/secure-history/setup'} and request.headers.get('sec-fetch-mode') == 'navigate'))):
+                  or (request.url.path in {'/', '/secure-history/setup', '/secure-history/linked'} and request.headers.get('sec-fetch-mode') == 'navigate'))):
             response = JSONResponse({'detail': 'Origin not allowed.'}, status_code=403)
         else:
             response = await call_next(request)
@@ -399,6 +399,7 @@ def create_app(frontend_dir: Path = FRONTEND_ROOT):
     def unbound_relay():
         raise HTTPException(404, 'Not found.')
 
+    @application.get('/secure-history/linked')
     @application.get('/secure-history/setup')
     @application.get('/secure-history')
     @application.get('/disclaimer')

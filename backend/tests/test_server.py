@@ -139,3 +139,16 @@ def test_shutdown_finishes_accepted_work_and_restart_recreates_worker(server, mo
         assert service.guests.sessions == {}
         with service.history.connection() as connection:
             assert connection.execute('SELECT COUNT(*) FROM history_documents').fetchone()[0] == 0
+
+
+def test_account_link_return_allows_navigation_but_not_cross_site_fetch(server):
+    with TestClient(server, base_url='http://localhost:3001') as client:
+        headers = {'sec-fetch-site': 'cross-site', 'origin': 'http://localhost:8080'}
+        assert client.get('/secure-history/linked', headers=headers).status_code == 403
+        headers['sec-fetch-mode'] = 'navigate'
+        page = client.get('/secure-history/linked', headers=headers)
+        assert page.status_code == 200
+        assert '<title>Redacted</title>' in page.text
+        assert page.headers['referrer-policy'] == 'no-referrer'
+        assert client.post('/secure-history/linked', headers=headers).status_code == 403
+        assert client.get('/api/service/tide/setup/v2/session', headers=headers).status_code == 403

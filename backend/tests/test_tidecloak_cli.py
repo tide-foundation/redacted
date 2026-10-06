@@ -130,3 +130,79 @@ def test_launch_timeout_becomes_manual_fallback(cli, monkeypatch):
     def timeout(args, **kw): raise cli.subprocess.TimeoutExpired(args, kw['timeout'])
     monkeypatch.setattr(cli.subprocess, 'run', timeout)
     assert not cli.open_setup_browser('http://localhost:3001/')
+
+
+def test_container_handoff_prints_host_port_and_cleans_permit(cli, monkeypatch, tmp_path, capsys):
+    def launch(origin, path, body=None):
+        assert origin == 'http://127.0.0.1:8000'
+        assert body['password'] == 'private-owner-password'
+        assert (tmp_path / 'tide/launch-permit.json').exists()
+        return {'url': origin + '/secure-history/setup#setup=private-token'}
+    monkeypatch.setattr(cli, 'call', launch)
+    link = cli.handoff('http://127.0.0.1:8000', tmp_path, 'owner',
+                       'private-owner-password', open_browser=False,
+                       public_origin='http://localhost:3099')
+    assert link == 'http://localhost:3099/secure-history/setup#setup=private-token'
+    output = capsys.readouterr().out
+    assert link in output
+    assert '8000' not in output
+    assert 'private-owner-password' not in output
+    assert not (tmp_path / 'tide/launch-permit.json').exists()
+
+
+@pytest.mark.parametrize('input_format', ['env', 'container-env'])
+def test_container_helper_reads_credentials_from_stdin(cli, monkeypatch, input_format, tmp_path):
+    import io
+    import json
+    import sys
+    monkeypatch.setitem(sys.modules, 'tidecloak', cli)
+    spec = importlib.util.spec_from_file_location('container_cli', Path(__file__).resolve().parents[2] / 'scripts/tidecloak-container.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    entries = ['KC_BOOTSTRAP_ADMIN_USERNAME=owner', 'KC_BOOTSTRAP_ADMIN_PASSWORD=secret=with=equals']
+    source = '\n'.join(entries) if input_format == 'env' else json.dumps([{'Config': {'Env': entries}}])
+    monkeypatch.setattr(sys, 'argv', ['helper', input_format])
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(source))
+    monkeypatch.setenv('REDACTED_PUBLIC_URL', 'http://localhost:3099')
+    monkeypatch.setenv('PRIVACY_DATA_DIR', str(tmp_path))
+    monkeypatch.setattr(module, 'wait_for_app', lambda origin: {'configured': False})
+    calls = []
+    monkeypatch.setattr(module, 'handoff', lambda *args, **kwargs: calls.append((args, kwargs)))
+    module.main()
+    assert calls == [(('http://127.0.0.1:8000', tmp_path, 'owner', 'secret=with=equals'),
+                      {'open_browser': False, 'public_origin': 'http://localhost:3099'})]
+
+
+@pytest.mark.parametrize('kind', ['managed', 'external', 'external-configured'])
+def test_single_start_command_selects_existing_installation(tmp_path, kind):
+    import os
+    import shutil
+    import subprocess
+    scripts = tmp_path / 'scripts'; scripts.mkdir()
+    shutil.copy(Path(__file__).resolve().parents[2] / 'scripts/tidecloak.sh', scripts / 'tidecloak.sh')
+    private = tmp_path / '.tidecloak'; private.mkdir()
+    (private / 'bootstrap.env').write_text('KC_BOOTSTRAP_ADMIN_USERNAME=owner\nKC_BOOTSTRAP_ADMIN_PASSWORD=fixture\n')
+    binary = tmp_path / 'bin'; binary.mkdir()
+    docker = binary / 'docker'
+    docker.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$TEST_LOG"
+case "$*" in
+  *' status') printf '%s\\n' "$TEST_KIND" ;;
+  *' env')
+    if [ "$TEST_KIND" != external-configured ]; then
+      body=$(cat)
+      case "$body" in *KC_BOOTSTRAP_ADMIN_PASSWORD=fixture*) ;; *) exit 4 ;; esac
+    fi
+    printf 'http://localhost:3001/secure-history/setup\\n' ;;
+esac
+''')
+    docker.chmod(0o755)
+    log = tmp_path / 'commands'
+    result = subprocess.run(['bash', str(scripts / 'tidecloak.sh'), 'start', '--no-browser'],
+                            input='owner\nfixture\n', text=True, capture_output=True,
+                            env={**os.environ, 'PATH': str(binary) + ':' + os.environ['PATH'],
+                                 'TEST_LOG': str(log), 'TEST_KIND': kind})
+    assert result.returncode == 0, result.stderr
+    assert ('up -d tidecloak' in log.read_text()) == (kind == 'managed')
+    assert 'fixture' not in log.read_text() + result.stdout
+    assert 'http://localhost:3001/secure-history/setup' in result.stdout

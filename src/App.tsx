@@ -9,6 +9,7 @@ import type { SecureHistoryProvider } from './history';
 import { ReviewPanel } from './ReviewPanel';
 import { AccountMenu } from './AccountMenu';
 import { SecureHistoryPage } from './SecureHistoryPage';
+import { TideLinkComplete } from './TideLinkComplete';
 import { TideSetupPage } from './TideSetupPage';
 import { DisclaimerPage } from './DisclaimerPage';
 
@@ -53,6 +54,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
   const [busy, setBusy] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [resultError, setResultError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState('');
   const [resetFailed, setResetFailed] = useState(false);
   const [drag, setDrag] = useState(false);
   const [preview, setPreview] = useState<{ id: string; text: string } | null>(null);
@@ -101,6 +103,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
       if (controller.signal.aborted || version !== generation.current) return;
       const changedSession = csrfRef.current && next.csrf_token !== csrfRef.current;
       const replaced = currentRef.current && next.document?.id !== currentRef.current.id;
+      if (changedSession && currentRef.current) setSessionNotice('Your temporary session ended or the service restarted. Add your file again to continue.');
       if (changedSession || replaced) clearTransient();
       csrfRef.current = next.csrf_token; setCsrf(next.csrf_token);
       currentRef.current = next.document; setCurrent(next.document);
@@ -191,7 +194,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
     if (!/\.(docx|pdf)$/i.test(next.name)) { setError('Choose a PDF or DOCX. Convert legacy .doc files to .docx first.'); return; }
     if (next.size > 20 * 1024 * 1024) { setError('Choose a file smaller than 20 MB.'); return; }
     if (!next.size) { setError('This file is empty.'); return; }
-    closeDetails(); setFile(next); setError('');
+    closeDetails(); setFile(next); setError(''); setSessionNotice('');
   }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -282,7 +285,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
       <a className="brand" href="/" aria-label="Redacted home" onClick={event => { event.preventDefault(); navigate('/'); }}><img src="/brand/redacted-logo.svg" alt="Redacted" width="2048" height="455" /></a>
       <AccountMenu identity={identity} provider={historyProvider} available={historyAvailable} onInformation={() => navigate('/secure-history')}/>
     </header>
-    {path === '/secure-history/setup' ? <TideSetupPage identity={identity} provider={historyProvider} navigate={navigate}/> : path === '/disclaimer' ? <DisclaimerPage navigate={navigate}/> : path === '/secure-history' ? <SecureHistoryPage identity={identity} provider={historyProvider} available={historyAvailable} navigate={navigate}/> : <main>
+    {path === '/secure-history/linked' ? <TideLinkComplete/> : path === '/secure-history/setup' ? <TideSetupPage identity={identity} provider={historyProvider} navigate={navigate}/> : path === '/disclaimer' ? <DisclaimerPage navigate={navigate}/> : path === '/secure-history' ? <SecureHistoryPage identity={identity} provider={historyProvider} available={historyAvailable} navigate={navigate}/> : <main>
       <h1 className="sr-only">Redact a document</h1>
       <form onSubmit={submit}>
         <input ref={input} id="document" type="file" accept=".pdf,.docx" onClick={() => setChoosing(true)} onChange={e => choose(e.target.files?.[0])} className="file-input" disabled={busy || processing}/>
@@ -319,10 +322,11 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
         </div>
       </form>
       {connection && <div className="notice" role="status">Service unavailable.</div>}
+      {sessionNotice && <div className="notice" role="status">{sessionNotice}</div>}
       {health && !health.model_installed && <div className="notice" role="status">Model unavailable. See the README for setup.</div>}
       {error && <div className="notice error" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={17}/></button></div>}
       <section className="library" aria-label="Files"><div className="library-heading"><h2>Files</h2></div>
-        {resultError ? <div className="empty" role="status">{resetFailed ? <><span>The working session could not be reset.</span><button className="text-button" onClick={() => void resetGuestSession()}>Retry reset</button></> : 'Could not load the current result.'}</div> : loading ? <div className="empty" role="status"><LoaderCircle className="spin" size={18}/><span>Loading…</span></div> : !current ? (identity.status !== 'authenticated' ? <div className="empty">No files yet.</div> : null) : <>
+        {resultError ? <div className="empty" role="status">{resetFailed ? <><span>The working session could not be reset.</span><button className="text-button" onClick={() => void resetGuestSession()}>Retry reset</button></> : <><span>Connection interrupted. Reconnecting to your temporary result…</span><button className="text-button" onClick={() => void refreshCurrent()}>Retry now</button></>}</div> : loading ? <div className="empty" role="status"><LoaderCircle className="spin" size={18}/><span>Loading…</span></div> : !current ? (identity.status !== 'authenticated' ? <div className="empty">No files yet.</div> : null) : <>
           <article className="document-row"><div className="doc-icon"><FileText size={22}/></div><div className="doc-info">
             <h3><span className={`document-name${processing ? ' is-processing' : ''}`} title={current.filename || undefined}><span className="filename-text">{current.filename || `Document ${current.id.slice(0, 8)}`}</span>{processing && <><span className="redaction-loader" aria-hidden="true"/><span className="sr-only" role="status">{current.status === 'queued' ? 'Queued' : 'Processing'}</span></>}</span><span className="mode-pill">{modeLabels[current.mode]?.[current.status === 'complete' ? 1 : 0] || current.mode}</span>{current.status === 'failed' && <span className="status failed">Failed</span>}</h3>
             <p>{new Date(current.created).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
@@ -333,7 +337,7 @@ export default function App({ historyProvider = unavailableHistoryProvider }: { 
               <div className="downloads">{(current.source_type === 'pdf' ? ['pdf', 'docx', 'txt'] : ['docx', 'pdf', 'txt']).map(ext => <a key={ext} title={current.source_type === ext && current.layout_preserved ? 'Original layout' : 'Rebuilt text'} href={`/api/service/guest/documents/${current.id}/download/${ext}`} aria-label={`Download ${ext.toUpperCase()} for document ${current.id.slice(0, 8)}`}><ArrowDownToLine size={13}/>{ext.toUpperCase()}</a>)}</div></>}
             <button className="delete" onClick={remove} disabled={processing || deleting || saving} aria-label={`Delete document ${current.id.slice(0, 8)} and all its output files`} title="Delete document and all output files">{deleting ? <LoaderCircle className="spin" size={17}/> : <Trash2 size={17}/>}</button>
           </div></article>
-          {current.status === 'complete' && identity.status !== 'authenticated' && <p className="history-prompt">Keep this result? <a href="/secure-history" onClick={event => { event.preventDefault(); navigate('/secure-history'); }}>Secure your history.</a></p>}
+          {current.status === 'complete' && identity.status !== 'authenticated' && <p className="history-prompt"><a href="/secure-history" onClick={event => { event.preventDefault(); navigate('/secure-history'); }}>Set up encrypted history for future uploads.</a></p>}
           {current.status === 'complete' && identity.status === 'authenticated' && <p className="history-prompt" role="status">{saving ? 'Encrypting and saving…' : savedId === current.id ? 'Saved to your encrypted history.' : retainedSource.current ? <button className="text-button" onClick={() => void saveCurrent()}>Retry saving encrypted history</button> : 'Upload again to save the original and result to history.'}</p>}
         </>}
         {detailLoading && <p className="empty" role="status"><LoaderCircle className="spin" size={18}/>Loading details…</p>}
