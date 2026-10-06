@@ -14,6 +14,8 @@ export type DocumentResult = {
   error?: string | null;
   warning?: string | null;
   protection_version?: number;
+  review_revision?: number;
+  detail_count?: number;
   warning_codes?: string[];
   replacements?: ConcealedDetection[] | null;
 };
@@ -37,7 +39,7 @@ export const modeLabels: Record<Mode, [string, string]> = {
 export const categoryLabels: Record<string, string> = {
   private_person: 'Names', private_address: 'Addresses', private_email: 'Emails',
   private_phone: 'Phone numbers', private_date: 'Dates', private_url: 'URLs',
-  account_number: 'Accounts', secret: 'Secrets',
+  account_number: 'Accounts', secret: 'Secrets', manual: 'Added by you',
 };
 
 // These fixed values can be shown even for older encrypted histories without

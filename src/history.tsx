@@ -3,11 +3,12 @@ import { ArrowDownToLine, Trash2, FileText } from 'lucide-react';
 import type { DetectionReview, DocumentResult, OutputFormat, RevealedDetection } from './types';
 import { modeLabels, categoryLabels } from './types';
 import { ReviewPanel } from './ReviewPanel';
+import type { Correction } from './corrections';
 
 export type IdentityState =
   | { status: 'unavailable'; reason: string }
   | { status: 'signed-out' | 'loading' | 'error' }
-  | { status: 'authenticated'; ownerKey: string };
+  | { status: 'authenticated'; ownerKey: string; canWrite?: boolean };
 export type { RevealedDetection } from './types';
 export type HistoryRecord = DocumentResult;
 export type TransientHistoryInput = {
@@ -23,6 +24,8 @@ export type TransientHistoryInput = {
 // Authentication and protection are supplied by the Tide adapter.
 // The adapter owns authorised API access and decryption; tokens are not component props.
 export interface SecureHistoryProvider {
+  correction?(id: string, signal: AbortSignal): Promise<Correction>;
+  saveCorrection?(id: string, value: Correction, signal: AbortSignal): Promise<Correction>;
   collectGuest?(id: string, source: Blob, signal: AbortSignal): Promise<Pick<TransientHistoryInput, 'source' | 'manifest' | 'outputs'>>;
   testProtection?(signal: AbortSignal): Promise<void>;
   getSnapshot(): IdentityState;
@@ -132,7 +135,7 @@ export function HistoryPanel({ provider, identity, refreshKey = 0, hasCurrent = 
       <div className="doc-icon"><FileText size={22}/></div>
       <div className="doc-info"><h3><HistoryFilename provider={provider} record={record} revision={nameRevision} onName={nameLoaded}/><span className="mode-pill">{modeLabels[record.mode][1]}</span></h3>
         <p>{new Date(record.created).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
-        <div className="counts">{Object.entries(record.counts).length ? Object.entries(record.counts).map(([category, count]) => <span key={category}>{count} {categoryLabels[category]?.toLowerCase() || category}</span>) : <span>No detections</span>}</div>
+        <div className="counts">{record.review_revision ? <span>{record.detail_count} hidden details · Reviewed</span> : Object.entries(record.counts).length ? Object.entries(record.counts).map(([category, count]) => <span key={category}>{count} {categoryLabels[category]?.toLowerCase() || category}</span>) : <span>No detections</span>}</div>
       </div>
       <div className="doc-actions">
         <button className={`text-button${busyAction === record.id + ':source' ? ' action-decrypting' : ''}`} aria-busy={busyAction === record.id + ':source'} onClick={() => void startAction(record.id + ':source', async signal => {
@@ -158,6 +161,15 @@ export function HistoryPanel({ provider, identity, refreshKey = 0, hasCurrent = 
       </div>
     </article>
     {selected?.record.id === record.id && <ReviewPanel id={`review-${record.id}`} review={selected.review} onClose={() => setSelected(null)}
+      correctionAccess={provider.correction ? {
+        load: signal=>provider.correction!(record.id,signal),
+        save: identity.status==='authenticated' && identity.canWrite!==false && provider.saveCorrection ? async (value,signal)=>{
+          const saved=await provider.saveCorrection!(record.id,value,signal);
+          const review=await provider.review(record.id,signal);
+          if(!signal.aborted){setSelected({record,review});setRevision(n=>n+1);}
+          return saved;
+        } : undefined,
+      }:undefined}
       onReveal={async signal => { const values = await provider.reveal(record.id, signal); if (!signal.aborted) setNameRevision(value => value + 1); return values; }}/>}
     </Fragment>)}
   </>;

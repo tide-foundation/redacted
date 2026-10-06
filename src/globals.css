@@ -336,3 +336,27 @@ dialog pre { font: 13px/1.8 Inter, sans-serif; white-space: pre-wrap; overflow-w
 .setup-action-message { border-left: 3px solid #111; background: #fafaf9; }
 .setup-progress-message p, .setup-action-message p { margin: .6rem 0 0; }
 @media (prefers-reduced-motion: reduce) { .setup-progress-message .spin { animation: none; } }
+
+.correction-editor { margin-top:2rem; padding-top:1.5rem; border-top:1px solid #ddd; }
+.correction-actions { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; margin:1rem 0; }
+.correction-layout { display:grid; grid-template-columns:minmax(0,1fr) 13rem; gap:1.5rem; }
+.correction-text { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.9; padding:.5rem 0; user-select:text; min-width:0; }
+.correction-text ::selection { background:#ffe68a; color:#151515; }
+.correction-text.is-highlighting { cursor:crosshair; }
+.correction-hidden { position:relative; text-decoration:underline dotted; text-underline-offset:4px; }
+.correction-added { background:#fff0ac; }
+.correction-hidden[role=button] { cursor:pointer; }
+.correction-hidden[role=button]::after { content:'×'; position:absolute; right:-.65rem; top:-.9rem; width:1.15rem; height:1.15rem; line-height:1.05rem; text-align:center; border-radius:50%; background:#151515; color:white; font:16px/1.05rem sans-serif; opacity:0; pointer-events:none; user-select:none; text-decoration:none; }
+.correction-hidden[role=button]:hover::after, .correction-hidden[role=button]:focus-visible::after { opacity:1; pointer-events:auto; }
+.correction-hidden[role=button]:hover, .correction-hidden:focus-visible { background:#fff0ac; outline:1px solid #dcc260; }
+.correction-summary { overflow-wrap:anywhere; font-size:.8rem; padding-top:.5rem; }
+.correction-summary h3 { font-size:.85rem; margin:1.2rem 0 .5rem; }
+.correction-summary ul { list-style:none; padding:0; }
+.correction-summary li { display:flex; flex-direction:column; gap:.25rem; margin:.6rem 0; }
+.correction-actions .primary { width:auto; padding:.8rem 1.2rem; }
+@media(max-width:650px) { .correction-layout { grid-template-columns:minmax(0,1fr); } }
+@media(hover:none) { .correction-hidden[role=button]::after { opacity:1; pointer-events:auto; } }
+
+.review-panel, .correction-editor, .document-row { scroll-margin-top: 1.5rem; }
+.correction-status { display:flex; align-items:center; gap:.65rem; margin-top:1.5rem; padding:1rem; border:1px solid #c6d7c8; background:#f0f6f0; color:#234a2a; font-size:.85rem; }
+.correction-status svg { flex-shrink:0; }

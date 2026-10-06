@@ -62,7 +62,11 @@ The compiled browser application includes these components:
 | React 19.2.4, React DOM 19.2.4 and Scheduler 0.27.0 | MIT; Meta Platforms, Inc. and affiliates | [React-MIT.txt](public/licenses/React-MIT.txt) |
 | Lucide React 0.468.0 | ISC, with the upstream Cole Bemis / Feather MIT attribution retained | [Lucide-ISC.txt](public/licenses/Lucide-ISC.txt) |
 
-These files are copied from the installed packages without editing their notices.
+| docx | MIT | [docx-MIT.txt](public/licenses/docx-MIT.txt) |
+| pdf-lib | MIT | [pdf-lib-MIT.txt](public/licenses/pdf-lib-MIT.txt) |
+| @pdf-lib/fontkit | MIT | [upstream README and licence declaration](public/licenses/fontkit-README.md) |
+
+These files retain the installed upstream notices. The fontkit package and repository declare MIT in their README and package metadata but do not ship a standalone licence file; its unmodified README is retained here.
 Vite includes them in the static build, where they are available at
 `/licenses/React-MIT.txt` and `/licenses/Lucide-ISC.txt`. React, React DOM and
 Scheduler supply identical licence texts in these versions. Upstream sources:

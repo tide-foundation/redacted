@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from starlette.staticfiles import StaticFiles
 
-from backend.auth import VerifiedOwner, require_owner
+from backend.auth import VerifiedOwner, require_owner, require_writer
 from backend import tide_config
 from backend.tide_setup import router as tide_router
 from backend.tide_onboarding import router as onboarding_router
@@ -139,7 +139,7 @@ def capabilities():
 
 @api.get('/identity')
 def identity(owner: VerifiedOwner = Depends(require_owner)):
-    return {'owner_id': owner.owner_id}
+    return {'owner_id': owner.owner_id, 'can_write': owner.can_write}
 
 
 @api.get('/guest/current')
@@ -213,6 +213,21 @@ def review(identifier: str, session=Depends(guest_session)):
     return concealed_review(guests.get_manifest(session, identifier))
 
 
+@api.get('/guest/documents/{identifier}/correction')
+def guest_correction(identifier: str, session=Depends(guest_session)):
+    return guests.get_manifest(session, identifier)
+
+
+@api.put('/guest/documents/{identifier}/correction')
+async def save_guest_correction(identifier: str, request: Request, session=Depends(guest_mutation)):
+    import json
+    try:
+        value = json.loads(await read_bounded(request, 16 * 1024 * 1024))
+    except ValueError:
+        raise HTTPException(422, 'Invalid review document.') from None
+    return await asyncio.to_thread(guests.save_correction, session, identifier, value)
+
+
 @api.get('/guest/documents/{identifier}/revealed-detections')
 def reveal_detections(identifier: str, session=Depends(guest_session)):
     return {'values': guests.revealed_detections(session, identifier)}
@@ -271,7 +286,7 @@ def list_history(owner: VerifiedOwner = Depends(require_owner)):
 
 
 @api.post('/history', status_code=201)
-def create_history(metadata: HistoryMetadata, owner: VerifiedOwner = Depends(require_owner)):
+def create_history(metadata: HistoryMetadata, owner: VerifiedOwner = Depends(require_writer)):
     return history.create(owner, metadata)
 
 
@@ -281,13 +296,13 @@ def read_history(identifier: str, owner: VerifiedOwner = Depends(require_owner))
 
 
 @api.delete('/history/{identifier}')
-def delete_history(identifier: str, owner: VerifiedOwner = Depends(require_owner)):
+def delete_history(identifier: str, owner: VerifiedOwner = Depends(require_writer)):
     history.delete(owner, identifier)
     return {'deleted': True}
 
 
 @api.put('/history/{identifier}/artifacts/{kind}')
-async def upload_artifact(identifier: str, kind: str, request: Request, owner: VerifiedOwner = Depends(require_owner)):
+async def upload_artifact(identifier: str, kind: str, request: Request, owner: VerifiedOwner = Depends(require_writer)):
     history.get(owner, identifier)
     if kind not in KINDS:
         raise HTTPException(400, 'Unsupported artifact kind.')
@@ -298,8 +313,23 @@ async def upload_artifact(identifier: str, kind: str, request: Request, owner: V
     return {'stored': True}
 
 
+@api.get('/history/{identifier}/correction')
+def read_history_correction(identifier: str, owner: VerifiedOwner = Depends(require_owner)):
+    return Response(history.correction(owner, identifier), media_type='application/octet-stream')
+
+
+@api.put('/history/{identifier}/correction')
+async def save_history_correction(identifier: str, request: Request, detail_count: int, revision: int,
+                                  only_if_missing: bool = False, owner: VerifiedOwner = Depends(require_writer)):
+    history.get(owner, identifier)
+    if request.headers.get('content-type', '').split(';')[0] != 'application/octet-stream':
+        raise HTTPException(415, 'Send browser-encrypted correction data.')
+    payload = await read_bounded(request, MAX_ARTIFACT)
+    return await asyncio.to_thread(history.save_correction, owner, identifier, payload, detail_count, revision, only_if_missing)
+
+
 @api.put('/history/{identifier}/filename')
-async def upgrade_history_filename(identifier: str, request: Request, owner: VerifiedOwner = Depends(require_owner)):
+async def upgrade_history_filename(identifier: str, request: Request, owner: VerifiedOwner = Depends(require_writer)):
     history.get(owner, identifier)
     if request.headers.get('content-type', '').split(';')[0] != 'application/octet-stream':
         raise HTTPException(415, 'Send the protected filename as opaque binary data.')
@@ -308,7 +338,7 @@ async def upgrade_history_filename(identifier: str, request: Request, owner: Ver
 
 
 @api.put('/history/{identifier}/replacements')
-def add_history_replacements(identifier: str, projection: ReplacementProjection, owner: VerifiedOwner = Depends(require_owner)):
+def add_history_replacements(identifier: str, projection: ReplacementProjection, owner: VerifiedOwner = Depends(require_writer)):
     return history.add_replacements(owner, identifier, projection)
 
 
@@ -319,7 +349,7 @@ def get_artifact(identifier: str, kind: str, owner: VerifiedOwner = Depends(requ
 
 
 @api.post('/history/{identifier}/commit')
-def commit_history(identifier: str, owner: VerifiedOwner = Depends(require_owner)):
+def commit_history(identifier: str, owner: VerifiedOwner = Depends(require_writer)):
     return history.commit(owner, identifier)
 
 

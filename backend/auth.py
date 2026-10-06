@@ -7,7 +7,7 @@ import json
 from threading import Lock
 import time
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 import jwt
 
 from backend import tide_config
@@ -16,6 +16,7 @@ from backend import tide_config
 @dataclass(frozen=True)
 class VerifiedOwner:
     owner_id: str
+    can_write: bool = True
 
     def __post_init__(self):
         if not self.owner_id or len(self.owner_id) > 200:
@@ -100,10 +101,16 @@ def require_owner(request: Request) -> VerifiedOwner:
                 or not isinstance(claims['sub'], str) or not 1 <= len(claims['sub']) <= 512):
             raise failure()
         roles = claims.get('realm_access', {}).get('roles', [])
-        if not isinstance(roles, list) or not {'_tide_enabled', '_tide_history.selfencrypt', '_tide_history.selfdecrypt'}.issubset(roles):
+        if not isinstance(roles, list) or not {'_tide_enabled', '_tide_history.selfdecrypt'}.issubset(roles):
             raise HTTPException(403, 'Personal-history permissions are not active. Complete setup and sign in again.')
         verify_proof(request, token, claims, config)
         owner = digest(json.dumps([claims['iss'], claims['sub']], separators=(',', ':')).encode())
-        return VerifiedOwner(owner)
+        return VerifiedOwner(owner, can_write='_tide_history.selfencrypt' in roles)
     except (jwt.PyJWTError, ValueError, TypeError, KeyError, AttributeError):
         raise failure() from None
+
+
+def require_writer(owner: VerifiedOwner = Depends(require_owner)) -> VerifiedOwner:
+    if not owner.can_write:
+        raise HTTPException(403, 'This account has read-only access.')
+    return owner

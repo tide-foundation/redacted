@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Eye, EyeOff, X } from 'lucide-react';
+import { Eye, EyeOff, Pencil, X } from 'lucide-react';
 import type { DetectionReview, RevealedDetection } from './types';
 import { categoryLabels } from './types';
+import { CorrectionEditor, type CorrectionAccess } from './CorrectionEditor';
 
 export type RevealValues = (signal: AbortSignal) => Promise<RevealedDetection[]>;
 
-export function ReviewPanel({ id, review, onClose, onReveal }: {
+export function ReviewPanel({ id, review, onClose, onReveal, correctionAccess }: {
   id?: string;
   review: DetectionReview;
   onClose: () => void;
   onReveal?: RevealValues;
+  correctionAccess?: CorrectionAccess;
 }) {
+  const section = useRef<HTMLElement>(null);
+  const [editing,setEditing]=useState(false);
+  useEffect(() => {
+    section.current?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+  }, [editing]);
   const [values, setValues] = useState<RevealedDetection[] | null>(null);
   const [pending, setPending] = useState(false);
   const [replacements, setReplacements] = useState<Record<string, string>>({});
@@ -51,8 +58,10 @@ export function ReviewPanel({ id, review, onClose, onReveal }: {
   const revealed = new Map(values?.map(value => [`${value.category}:${value.occurrence}`, value]));
   const active = values !== null || pending;
   const report = review.scan_report;
-  return <section id={id} className="review-panel" aria-label="Detection review">
+  if(editing && correctionAccess) return <CorrectionEditor access={correctionAccess} onBack={()=>setEditing(false)} onClose={onClose}/>;
+  return <section ref={section} id={id} className="review-panel" aria-label="Detection review">
     <div className="preview-header review-heading"><h2>Detections</h2><div className="review-actions">
+      {correctionAccess && <button className="text-button" onClick={()=>{clearValues();setEditing(true);}}><Pencil size={14} aria-hidden="true"/> Review and correct</button>}
       {review.detections.length > 0 && <button className="text-button reveal-button" disabled={!onReveal} aria-label={active ? 'Hide original values' : 'Reveal original values'} aria-pressed={values !== null} onClick={() => void toggle()}>
         {active ? <EyeOff size={14}/> : <Eye size={14}/>} {active ? 'Hide values' : 'Reveal values'}
       </button>}

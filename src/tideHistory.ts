@@ -3,6 +3,7 @@ import type { SecureHistoryProvider, IdentityState, TransientHistoryInput } from
 import { clearSetupSignIn, markSetupSignInAttempt } from './setupNavigation';
 import { fixedReplacement } from './types';
 import type { DetectionReview, DocumentResult, OutputFormat, RevealedDetection } from './types';
+import { correctionReview, fromManifest, parseCorrection, type Correction } from './corrections';
 
 export type TideConfig = { app_origin: string; issuer: string; client_id: string; adapter: Record<string, unknown> };
 type Manifest = Omit<DetectionReview, 'detections'> & { filename?: string; mode: DocumentResult['mode']; detections: (DetectionReview['detections'][number] & { original: string })[] };
@@ -73,14 +74,15 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
     if (!response.ok) {
       if (response.status === 403) clearCache();
       if (response.status === 401) { tc.clearToken(); emit({ status: 'signed-out' }); }
+      if (response.status === 409) throw new Error('This document changed in another tab. Close and reopen the review before saving.');
       throw new Error(response.status === 403 ? 'Personal-history permissions are not active. Complete setup and sign in again.' : 'Secure history is unavailable. Please try again.');
     }
     return response;
   }
   async function identify() {
     const result = await request('identity', new AbortController().signal);
-    const identity: { owner_id: string } = await result.json();
-    emit({ status: 'authenticated', ownerKey: identity.owner_id });
+    const identity: { owner_id: string; can_write?: boolean } = await result.json();
+    emit({ status: 'authenticated', ownerKey: identity.owner_id, canWrite: identity.can_write !== false });
   }
   tc.onAuthLogout = () => emit({ status: 'signed-out' });
   tc.onAuthRefreshError = () => { tc.clearToken(); emit({ status: 'signed-out' }); };
@@ -150,7 +152,45 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
     if (!m || !Array.isArray(m.detections) || !m.scan_report || typeof m.mode !== 'string') throw new Error('Invalid detection manifest.');
     return m;
   }
+  async function freshMetadata(id: string, signal: AbortSignal) {
+    const version=epoch;
+    const record: RecordMetadata = await (await request(`history/${encodeURIComponent(id)}`,signal)).json();
+    check(signal,version);
+    records.set(id,record); return record;
+  }
+  async function corrected(id: string, signal: AbortSignal, record: RecordMetadata) {
+    const version=epoch;
+    const response=await request(`history/${encodeURIComponent(id)}/correction`,signal);
+    const payload=JSON.parse(await (await unprotect(await response.blob(),id,'correction',signal)).text());
+    const value=parseCorrection(payload.review);
+    if(value.revision!==record.review_revision || value.detailCount!==record.detail_count || !payload.outputs || !formats.every(f=>typeof payload.outputs[f]==='string')) throw new Error('Saved correction does not match this revision. Reopen the review.');
+    const {fromBase64}=await import('./correctionExports');
+    if(await fromBase64(payload.outputs.txt,'text/plain').text()!==value.redacted) throw new Error('Saved output does not match its review.');
+    check(signal,version);
+    return {value,outputs:payload.outputs as Record<OutputFormat,string>};
+  }
+  async function loadCorrection(id: string, signal: AbortSignal) {
+    const record=await freshMetadata(id,signal);
+    if(record.review_revision) return (await corrected(id,signal,record)).value;
+    const m=await manifest(id,signal);
+    return fromManifest(m, await (await artifact(id,'output_txt',signal)).text());
+  }
+  async function saveCorrection(id: string, input: Correction, signal: AbortSignal, onlyIfMissing=false) {
+    if(state.status!=='authenticated' || state.canWrite===false) throw new Error('This account has read-only access.');
+    const version=epoch, value=parseCorrection(input);
+    const {exportCorrection,toBase64}=await import('./correctionExports');
+    const blobs=await exportCorrection(value.redacted,signal);
+    const outputs=Object.fromEntries(await Promise.all(formats.map(async f=>[f,await toBase64(blobs[f])])));
+    const review={...value,revision:value.revision+1};
+    const sealed=await protect(new Blob([JSON.stringify({review,outputs})]),id,'correction',signal);
+    check(signal,version);
+    const record: RecordMetadata=await (await request(`history/${encodeURIComponent(id)}/correction?detail_count=${value.detailCount}&revision=${value.revision}&only_if_missing=${onlyIfMissing}`,signal,{method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:sealed})).json();
+    check(signal,version);clearCache(id);records.set(id,record);
+    return onlyIfMissing ? (await corrected(id,signal,record)).value : review;
+  }
   return {
+    correction: loadCorrection,
+    saveCorrection,
     getSnapshot: () => state,
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
     async initialise({ completeSetup = false }: { completeSetup?: boolean } = {}) {
@@ -190,8 +230,8 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
       const m: Manifest = JSON.parse(await input.manifest.text());
       delete m.filename;
       const metadata = { source_type: input.metadata.source_type, mode: input.metadata.mode,
-        sensitivity: input.metadata.sensitivity, counts: input.metadata.counts,
-        layout_preserved: input.metadata.layout_preserved ?? false,
+        sensitivity: input.metadata.sensitivity, counts: m.scan_report.counts,
+        layout_preserved: m.scan_report.layout_preserved ?? false,
         warning_codes: m.scan_report.warnings.flatMap(w => w === 'Images are preserved but are not scanned for sensitive data.' ? ['images_unscanned'] : w === 'Original layout unavailable; clean rewrite used.' ? ['layout_fallback'] : []),
         protection_version: 2,
         replacements: m.detections.map(({category, occurrence, replacement}) => ({category, occurrence, replacement})) };
@@ -211,6 +251,10 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
         const completed = await (await request(`history/${draft.id}/commit`, signal, { method: 'POST' })).json();
         check(signal, version);
         records.set(completed.id, completed);
+        if ((m as any).correction) {
+          await saveCorrection(completed.id, {...parseCorrection((m as any).correction), revision:0}, signal, true);
+          Object.assign(completed, await freshMetadata(completed.id,signal));
+        }
         if (input.filename) knownNames.set(completed.id, input.filename);
         return { ...completed, filename: input.filename };
       } catch (error) {
@@ -243,7 +287,7 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
     },
     async recoverOriginal(id, signal) { return artifact(id, 'source', signal); },
     async review(id, signal) {
-      const record = await metadata(id, signal);
+      const record = await freshMetadata(id, signal);
       // Generated replacements are public metadata; originals stay encrypted.
       const detections = record.replacements ?? Object.entries(record.counts).flatMap(([category, count]) =>
         Array.from({ length: count }, (_, i) => ({ category, occurrence: i + 1, replacement: fixedReplacement(record.mode, category) })));
@@ -252,15 +296,21 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
         layout_fallback: 'Original layout unavailable; clean rewrite used.',
         ocr_unavailable: 'OCR is unavailable.',
       }[code] || 'Review the output before sharing.'));
-      return { detections, scan_report: { sensitivity: record.sensitivity, counts: record.counts,
+      const review = { detections, scan_report: { sensitivity: record.sensitivity, counts: record.counts,
         total_detections: detections.length, source_type: record.source_type || '',
         layout_preserved: record.layout_preserved ?? false, ocr_performed: false, warnings,
         limitations: ['Only extractable text is scanned. Images are not analysed and no OCR is run.',
           'The model can miss sensitive information or flag ordinary text. Review the output before sharing.',
           'Document properties are removed in every mode. Embedded image metadata is not scanned.'] } };
+      return record.review_revision ? correctionReview((await corrected(id,signal,record)).value, review.scan_report) : review;
     },
     async reveal(id, signal): Promise<RevealedDetection[]> {
       const version = epoch;
+      const fresh=await freshMetadata(id,signal);
+      if(fresh.review_revision) {
+        const {value}=await corrected(id,signal,fresh);const counts:Record<string,number>={};
+        return value.details.map(d=>({category:d.category,occurrence:counts[d.category]=(counts[d.category]||0)+1,original:value.text.slice(d.start,d.end),replacement:d.replacement}));
+      }
       const m = await manifest(id, signal);
       const record = await metadata(id, signal);
       check(signal, version);
@@ -287,15 +337,22 @@ export function createTideHistoryProvider(config: TideConfig): SecureHistoryProv
       }
       return m.detections.map(({ category, occurrence, original, replacement }) => ({ category, occurrence, original, replacement }));
     },
-    async download(id, format, signal) { return artifact(id, 'output_' + format, signal); },
+    async download(id, format, signal) {
+      const record=await freshMetadata(id,signal);
+      if(record.review_revision) {const payload=await corrected(id,signal,record);const {fromBase64}=await import('./correctionExports');return fromBase64(payload.outputs[format],{pdf:'application/pdf',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain;charset=utf-8'}[format]);}
+      return artifact(id, 'output_' + format, signal);
+    },
     async collectGuest(id, source, signal) {
       const m = await (await request(`guest/documents/${id}/protected-manifest`, signal)).blob();
+      const collectedRevision = JSON.parse(await m.text()).correction?.revision || 0;
       const outputs = {} as Record<OutputFormat, Blob>;
       for (const format of formats) {
         const response = await fetch(`/api/service/guest/documents/${id}/download/${format}`, { signal, cache: 'no-store' });
         if (!response.ok) throw new Error('The working result expired. Upload again before saving.');
         outputs[format] = await response.blob();
       }
+      const latest = await (await request(`guest/documents/${id}/protected-manifest`, signal)).json();
+      if ((latest.correction?.revision || 0) !== collectedRevision) throw new Error('The working review changed while saving. Retry to save its latest revision.');
       return { source, manifest: m, outputs };
     },
     async testProtection(signal) {

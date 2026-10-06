@@ -6,6 +6,8 @@ import { createServer as createViteServer } from 'vite';
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import {writeFile} from 'node:fs/promises';
+import {execFileSync} from 'node:child_process';
 const entry = resolve('__tide_storage_fixture__.ts');
 const sdk = '\0tide-test-sdk';
 const mock = `
@@ -72,9 +74,23 @@ const page = await browser.newPage();
 const artifacts = new Map(), metadata = [], deleted = [];
 const id = '11111111-1111-4111-8111-111111111111';
 let committed = 0, swapping = false, record = null, upgrades = 0, artifactReads = [];
+let correctionBytes=null, canWrite=true;
+let guestRevision=0, changeGuestDuringCollection=false;
 await page.route('**/api/service/**', async route => {
   const req = route.request(), path = new URL(req.url()).pathname, method = req.method();
-  if (path.endsWith('/identity')) return route.fulfill({ json: { owner_id: 'owner-fixture' } });
+  if(path.endsWith('/protected-manifest'))return route.fulfill({json:{correction:{revision:guestRevision}}});
+  if(path.includes('/guest/documents/')&&path.includes('/download/')){
+    if(changeGuestDuringCollection&&path.endsWith('/txt'))guestRevision++;
+    return route.fulfill({body:'fixture output'});
+  }
+  if (path.endsWith('/identity')) return route.fulfill({ json: { owner_id: 'owner-fixture',can_write:canWrite } });
+  if(path.endsWith('/correction')) {
+    if(method==='GET')return route.fulfill({contentType:'application/octet-stream',body:correctionBytes});
+    const query=new URL(req.url()).searchParams;
+    if(Number(query.get('revision'))!==(record.review_revision||0))return route.fulfill({status:409,json:{detail:'Conflict'}});
+    correctionBytes=req.postDataBuffer();record.review_revision=(record.review_revision||0)+1;record.detail_count=Number(query.get('detail_count'));
+    return route.fulfill({json:record});
+  }
   if (path.endsWith('/history') && method === 'POST') {
     const body = req.postDataJSON(); metadata.push(body);
     const draft = { ...body, id:metadata.length === 1 ? id : '22222222-2222-4222-8222-222222222222', created: new Date().toISOString(), status:'draft' };
@@ -227,6 +243,36 @@ try {
   assert.equal((await call('review',id)).detections[0].replacement,'Alex Example 1');
   assert.equal(await countDecrypts(),beforeSynthetic+1);
   assert.equal(JSON.stringify(record).includes('Alice'),false);
+  await page.evaluate(id=>window.provider.collectGuest(id,new Blob(['fixture source']),new AbortController().signal),id);
+  changeGuestDuringCollection=true;
+  assert.match(await page.evaluate(async id=>{try{await window.provider.collectGuest(id,new Blob(['fixture source']),new AbortController().signal);return 'unexpected';}catch(e){return e.message;}},id),/changed while saving/);
+  changeGuestDuringCollection=false;
+  // Corrections and all exports are encrypted as one atomic revision using the
+  // same owner/document context and history tag. Original artifacts stay intact.
+  const corrected = await page.evaluate(async id=>{
+    const {rebuild}=await import('/src/corrections.ts');
+    const value=rebuild('Alice and Bob.',[{start:0,end:5,category:'private_person'}],'placeholder');
+    return window.provider.saveCorrection(id,value,new AbortController().signal);
+  },id);
+  assert.equal(corrected.revision,1);assert.equal(record.detail_count,1);
+  for(const text of ['Alice','Bob','[NAME','details','redacted'])assert.equal(correctionBytes.includes(Buffer.from(text)),false);
+  const sealed=Buffer.from(correctionBytes);
+  await coldSession();
+  assert.equal((await call('correction',id)).redacted,'[NAME 1] and Bob.');
+  assert.equal((await call('reveal',id))[0].original,'Alice');
+  const files=await page.evaluate(async id=>{
+    const files={};for(const f of ['txt','pdf','docx'])files[f]=[...new Uint8Array(await (await window.provider.download(id,f,new AbortController().signal)).arrayBuffer())];return files;
+  },id);
+  for(const [format,bytes] of Object.entries(files))await writeFile(`/tmp/redacted-corrected.${format}`,Buffer.from(bytes));
+  assert.equal(Buffer.from(files.txt).toString(),'[NAME 1] and Bob.');
+  execFileSync('.venv/bin/python',['-c',`from docx import Document\nimport pymupdf\nassert '[NAME 1] and Bob.' in '\\n'.join(p.text for p in Document('/tmp/redacted-corrected.docx').paragraphs)\nwith pymupdf.open('/tmp/redacted-corrected.pdf') as pdf:\n text=''.join(p.get_text() for p in pdf)\n assert '[NAME 1] and Bob.' in text and 'Alice' not in text`]);
+  await page.evaluate(()=>window.failEncrypt=true);
+  assert.match(await page.evaluate(async ({id,value})=>{try{await window.provider.saveCorrection(id,value,new AbortController().signal);return 'unexpected';}catch(e){return e.message;}},{id,value:corrected}),/fixture encryption failure/);
+  assert.deepEqual(correctionBytes,sealed);await page.evaluate(()=>window.failEncrypt=false);
+  canWrite=false;await coldSession();
+  assert.equal((await call('correction',id)).detailCount,1);
+  assert.match(await page.evaluate(async ({id,value})=>{try{await window.provider.saveCorrection(id,value,new AbortController().signal);return 'unexpected';}catch(e){return e.message;}},{id,value:corrected}),/read-only/);
+  canWrite=true;await coldSession();
   // Delete invalidates decrypted filename and manifest caches as well.
   await call('remove',id);
   assert.deepEqual(await call('list'),[]);

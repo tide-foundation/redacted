@@ -118,6 +118,13 @@ class HistoryStore:
             conn.execute('CREATE TABLE IF NOT EXISTS history_artifacts ('
                          'document_id TEXT NOT NULL REFERENCES history_documents(id) ON DELETE CASCADE, '
                          'kind TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(document_id, kind))')
+            conn.execute('CREATE TABLE IF NOT EXISTS history_corrections ('
+                         'document_id TEXT PRIMARY KEY REFERENCES history_documents(id) ON DELETE CASCADE, '
+                         'payload BLOB NOT NULL, detail_count INTEGER NOT NULL, revision INTEGER NOT NULL, '
+                         'updated_by TEXT NOT NULL, updated_at REAL NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS history_review_audit ('
+                         'document_id TEXT NOT NULL REFERENCES history_documents(id) ON DELETE CASCADE, '
+                         'revision INTEGER NOT NULL, detail_count INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at REAL NOT NULL)')
             conn.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         self.path.chmod(0o600)
         # Legacy UUID output folders are a reserved namespace. Sweep every start
@@ -161,11 +168,13 @@ class HistoryStore:
         return row
 
     @staticmethod
-    def public(row):
+    def public(row, correction=None):
         import json
         return {'id': row['id'], 'created': datetime.fromtimestamp(row['created'], timezone.utc).isoformat(),
                 'status': row['status'], 'protection_version': row['protection_version'],
-                **json.loads(row['metadata'])}
+                **json.loads(row['metadata']),
+                'review_revision': correction['revision'] if correction else 0,
+                **({'detail_count': correction['detail_count'], 'reviewed_at': datetime.fromtimestamp(correction['updated_at'], timezone.utc).isoformat()} if correction else {})}
 
     def create(self, owner, metadata):
         owner_id = self.owner(owner)
@@ -184,12 +193,48 @@ class HistoryStore:
         owner_id = self.owner(owner)
         self.cleanup()
         with self.connection() as conn:
-            return [self.public(row) for row in conn.execute(
+            return [self.public(row, conn.execute('SELECT * FROM history_corrections WHERE document_id=?', (row['id'],)).fetchone()) for row in conn.execute(
                 "SELECT * FROM history_documents WHERE owner_id=? AND status='complete' ORDER BY created DESC", (owner_id,))]
 
     def get(self, owner, identifier):
         with self.connection() as conn:
-            return self.public(self._record(conn, owner, identifier))
+            return self.public(self._record(conn, owner, identifier), conn.execute('SELECT * FROM history_corrections WHERE document_id=?', (identifier,)).fetchone())
+
+    def correction(self, owner, identifier):
+        with self.connection() as conn:
+            self._record(conn, owner, identifier)
+            row = conn.execute('SELECT payload FROM history_corrections WHERE document_id=?', (identifier,)).fetchone()
+            if not row:
+                raise HTTPException(404, 'No saved correction.')
+            return row['payload']
+
+    def save_correction(self, owner, identifier, payload, detail_count, revision, only_if_missing=False):
+        if not owner.can_write:
+            raise HTTPException(403, 'This account has read-only access.')
+        if not payload or len(payload) > MAX_ARTIFACT:
+            raise HTTPException(413, 'Protected correction exceeds the storage limit.')
+        if type(detail_count) is not int or not 0 <= detail_count <= 200_000 or type(revision) is not int or revision < 0:
+            raise HTTPException(422, 'Invalid correction metadata.')
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = self._record(conn, owner, identifier)
+            if row['status'] != 'complete':
+                raise HTTPException(409, 'Finish saving the document first.')
+            old = conn.execute('SELECT * FROM history_corrections WHERE document_id=?', (identifier,)).fetchone()
+            if old and only_if_missing:
+                return self.public(row, old)
+            current = old['revision'] if old else 0
+            if revision != current:
+                raise HTTPException(409, 'This review changed in another tab. Reopen it before saving.')
+            size = conn.execute('SELECT COALESCE(SUM(length(payload)),0) FROM history_artifacts WHERE document_id=?', (identifier,)).fetchone()[0]
+            if size + len(payload) > MAX_DOCUMENT:
+                raise HTTPException(413, 'Protected document exceeds the storage limit.')
+            now = self.clock()
+            conn.execute('INSERT INTO history_corrections VALUES (?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET '
+                         'payload=excluded.payload, detail_count=excluded.detail_count, revision=excluded.revision, updated_by=excluded.updated_by, updated_at=excluded.updated_at',
+                         (identifier, payload, detail_count, current + 1, self.owner(owner), now))
+            conn.execute('INSERT INTO history_review_audit VALUES (?,?,?,?,?)', (identifier, current + 1, detail_count, self.owner(owner), now))
+            return self.public(row, {'revision': current + 1, 'detail_count': detail_count, 'updated_at': now})
 
     def put(self, owner, identifier, kind, payload):
         if kind not in KINDS:

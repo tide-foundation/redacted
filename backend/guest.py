@@ -201,9 +201,58 @@ class GuestStore:
             self.document(session, identifier, ready=True)
             return session.manifest
 
+    def save_correction(self, session, identifier, value):
+        from backend.corrections import validate
+        from backend.documents import export_files
+        with self.lock:
+            self.document(session, identifier, ready=True)
+            manifest = session.manifest
+            counts = validate(value, manifest.get('text'))
+            revision = (manifest.get('correction') or {}).get('revision', 0)
+            if value['revision'] != revision:
+                raise HTTPException(409, 'This review changed in another tab. Reopen it before saving.')
+        temporary = self.root / ('review-' + str(uuid4()))
+        try:
+            export_files(value['redacted'], temporary)
+            size = sum(p.stat().st_size for p in temporary.iterdir())
+            with self.lock:
+                self.document(session, identifier, ready=True)
+                if session.manifest is not manifest or (manifest.get('correction') or {}).get('revision', 0) != revision:
+                    raise HTTPException(409, 'The document changed. Reopen the review.')
+                if self.leases.get(identifier):
+                    raise HTTPException(409, 'Wait for the current download to finish, then save again.')
+                if size > self.max_result_bytes or sum(self.sizes.values()) - self.sizes.get(identifier, 0) + size > self.max_retained_bytes:
+                    raise HTTPException(413, 'The corrected output exceeds temporary storage limits.')
+                folder = self.root / identifier
+                backup = self.root / ('previous-' + str(uuid4()))
+                folder.rename(backup)
+                try:
+                    temporary.rename(folder)
+                except BaseException:
+                    backup.rename(folder)
+                    raise
+                shutil.rmtree(backup)
+                saved = {**value, 'revision': revision + 1}
+                manifest['correction'] = saved
+                session.document.update(counts=counts, layout_preserved=False, warning='Corrected downloads use a clean text layout.')
+                self.sizes[identifier] = size
+                return saved
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
     def revealed_detections(self, session, identifier):
         with self.lock:
             self.document(session, identifier, ready=True)
+            if session.manifest.get('correction'):
+                value = session.manifest['correction']
+                raw = value['text'].encode('utf-16-le')
+                counts, result = {}, []
+                for d in value['details']:
+                    counts[d['category']] = counts.get(d['category'], 0) + 1
+                    result.append({'category': d['category'], 'occurrence': counts[d['category']],
+                                   'original': raw[d['start'] * 2:d['end'] * 2].decode('utf-16-le'),
+                                   'replacement': d['replacement']})
+                return result
             # Explicitly project only the values requested by Reveal. Never copy
             # exact spans or future sensitive manifest fields into this response.
             return [{'category': item['category'], 'occurrence': item['occurrence'],
